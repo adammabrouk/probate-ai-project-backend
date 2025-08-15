@@ -1,3 +1,4 @@
+# check=skip=JSONArgsRecommended
 # ---- Builder Stage ----
 FROM python:3.11-slim as builder
 
@@ -50,4 +51,4 @@ EXPOSE 8000
 
 # Your CMD remains largely the same, but now runs from the venv's path implicitly
 # The uvicorn here will be the one installed in APP_VENV
-CMD uvicorn service_name.main:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD uvicorn probate_ops.main:app --host 0.0.0.0 --port ${PORT:-8000}
