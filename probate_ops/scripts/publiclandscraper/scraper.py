@@ -112,92 +112,43 @@ def first_or_empty(lst: List[str]) -> str:
 # Robust navigation helpers
 # ---------------------------
 
-def _click_property_search_or_go(driver: webdriver.Chrome, wait: WebDriverWait) -> None:
-    """
-    Click the 'Property Search' tile. If clicking fails, navigate using its href.
-    Ensures we land on Real Property Search (PageTypeID=2) or see Terms modal.
-    """
-    def find_tile():
-        return driver.find_element(By.XPATH, "//h3[normalize-space()='Property Search']/ancestor::a")
-
-    # Re-find after county selection (DOM refresh)
-    prop_link = wait.until(EC.presence_of_element_located(
-        (By.XPATH, "//h3[normalize-space()='Property Search']/ancestor::a")
-    ))
-    sleepy(0.2, 0.5)
-
-    # Try JS click first (overlays can block native)
+def _click_property_search_or_go(driver, wait: WebDriverWait) -> None:
+    quick = wait.until(EC.visibility_of_element_located((By.ID, "quickstartList")))
+    link = quick.find_element(By.XPATH, ".//a[.//h3[normalize-space()='Search Records']]")
+    href = link.get_attribute("href")
     try:
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", prop_link)
-        sleepy(0.2, 0.5)
-        driver.execute_script("arguments[0].click();", prop_link)
-    except StaleElementReferenceException:
-        prop_link = find_tile()
-        driver.execute_script("arguments[0].click();", prop_link)
+        link.click()
     except Exception:
-        # Native click fallback
         try:
-            prop_link.click()
+            driver.execute_script("arguments[0].click();", link)
         except Exception:
-            pass
-
-    # Verify navigation or do hard href get
-    def on_rp_or_terms(d):
-        return (
-            "PageTypeID=2" in d.current_url
-            or d.find_elements(By.CSS_SELECTOR, "div.modal.in, div.modal[aria-label='Terms and Conditions']")
-            or d.find_elements(By.ID, "ctlBodyPane_ctl01_ctl01_txtAddress")
-        )
+            driver.get(href)
 
     try:
-        WebDriverWait(driver, 6).until(on_rp_or_terms)
+        WebDriverWait(driver, 20).until(lambda d: "PageTypeID=2" in d.current_url)
     except TimeoutException:
-        # Pull href and go directly
-        try:
-            prop_link = find_tile()
-        except Exception:
-            # Re-locate via alternative anchor text (rare theme variant)
-            prop_link = wait.until(EC.presence_of_element_located(
-                (By.XPATH, "//a[.//h3[contains(., 'Property')]]")
-            ))
-        href = prop_link.get_attribute("href")
-        if not href:
-            # Last-resort: extract via 'Links' in page if present
-            alt = driver.find_elements(By.XPATH, "//a[contains(@href,'PageTypeID=2') and contains(.,'Property Search')]")
-            href = alt[0].get_attribute("href") if alt else None
-        if not href:
-            raise RuntimeError("Could not resolve Property Search link href.")
         driver.get(href)
-        WebDriverWait(driver, 12).until(on_rp_or_terms)
+        WebDriverWait(driver, 20).until(lambda d: "PageTypeID=2" in d.current_url)
 
-    # Terms modal → click Agree
+    # Terms popup
     try:
-        WebDriverWait(driver, 8).until(
-            EC.visibility_of_element_located(
-                (By.CSS_SELECTOR, "div.modal.in, div.modal[aria-label='Terms and Conditions']")
-            )
+        WebDriverWait(driver, 6).until(
+            EC.visibility_of_element_located((By.CSS_SELECTOR, "div.modal.in"))
         )
-        sleepy(0.4, 0.9)
-        agree = driver.find_element(
+        btn = driver.find_element(
             By.XPATH, "//div[contains(@class,'modal')]//a[@data-dismiss='modal' and normalize-space()='Agree']"
         )
-        driver.execute_script("arguments[0].click();", agree)
+        driver.execute_script("arguments[0].click();", btn)
         WebDriverWait(driver, 10).until(EC.invisibility_of_element_located((By.CSS_SELECTOR, "div.modal.in")))
-        WebDriverWait(driver, 6).until(
-            lambda d: "modal-open" not in d.find_element(By.TAG_NAME, "body").get_attribute("class")
-        )
-        sleepy(0.2, 0.5)
-    except TimeoutException:
-        # No modal shown (often after first accept)
+    except Exception:
         pass
 
 def choose_ga_and_county(driver, county_query: str) -> None:
-    """From qPublic homepage: Local tab -> State=Georgia -> County match -> Property Search."""
+    """Homepage → Local tab → State=Georgia → pick county → open Real Property Search (+Agree)."""
     driver.get(QPUBLIC_ROOT)
     wait = WebDriverWait(driver, 25)
-    sleepy(1.0, 2.0)
 
-    # Ensure Local tab
+    # Local tab
     try:
         local = wait.until(EC.presence_of_element_located((By.ID, "btnLocal")))
         if "active" not in (local.get_attribute("class") or ""):
@@ -205,30 +156,24 @@ def choose_ga_and_county(driver, county_query: str) -> None:
                 local.click()
             except Exception:
                 driver.execute_script("arguments[0].click();", local)
-        sleepy(0.2, 0.6)
     except Exception:
         pass
 
-    # Select Georgia
-    state_input = wait_clickable(driver, (By.ID, "stateMenuButton"), timeout=20)
+    # State = Georgia
+    state_input = wait.until(EC.element_to_be_clickable((By.ID, "stateMenuButton")))
     state_input.click()
-    sleepy(0.2, 0.5)
     state_input.send_keys(Keys.CONTROL, "a")
     state_input.send_keys("Georgia")
-    sleepy(0.5, 1.0)
-    ga_opt = wait_clickable(driver, (By.CSS_SELECTOR, "#stateMenuContent #state-option-Georgia"), timeout=15)
+    ga_opt = wait.until(EC.element_to_be_clickable(
+        (By.CSS_SELECTOR, "#stateMenuContent #state-option-Georgia")
+    ))
     ga_opt.click()
-    sleepy(0.3, 0.8)
 
-    # County dropdown
-    county_input = wait_clickable(driver, (By.ID, "areaMenuButton"), timeout=15)
+    # County: type then click first valid option
+    county_input = wait.until(EC.element_to_be_clickable((By.ID, "areaMenuButton")))
     county_input.click()
-    sleepy(0.2, 0.5)
     county_input.send_keys(Keys.CONTROL, "a")
     county_input.send_keys(county_query)
-    sleepy(0.7, 1.4)
-
-    # Click first real option
     area_menu = wait.until(EC.visibility_of_element_located((By.ID, "areaMenuContent")))
     options = area_menu.find_elements(By.CSS_SELECTOR, ".dropdown-option:not(.no-match):not(.all-option)")
     if not options:
@@ -237,9 +182,8 @@ def choose_ga_and_county(driver, county_query: str) -> None:
         options[0].click()
     except Exception:
         driver.execute_script("arguments[0].click();", options[0])
-    sleepy(0.3, 0.8)
 
-    # NOW: robustly open Real Property Search
+    # Finally go to Real Property Search
     _click_property_search_or_go(driver, wait)
 
 # ---------------------------
