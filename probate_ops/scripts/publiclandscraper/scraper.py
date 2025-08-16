@@ -7,6 +7,8 @@ import time
 import random
 import argparse
 import logging
+import json
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 
@@ -22,6 +24,16 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 
+
+NO_RESULTS_XPATH = (
+    "//h2[@aria-live='assertive' and contains("
+    "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "
+    "'no results match your search criteria.')]"
+)
+
+RESULT_LINK_XPATH = (
+    "//a[contains(@href,'KeyValue')]"
+)
 HOME_URL = "https://qpublic.schneidercorp.com/"
 DEFAULT_TIMEOUT = 35
 
@@ -42,6 +54,14 @@ class RowCtx:
     appid: Optional[str] = None
     visited_url: Optional[str] = None
 
+
+def page_has_no_results_text(driver) -> bool:
+    """Return True iff the 'No results match your search criteria.' message is present."""
+    return bool(driver.find_elements(By.XPATH, NO_RESULTS_XPATH))
+
+def page_has_result_links(driver) -> bool:
+    """Return True iff at least one parcel/result link is present."""
+    return bool(driver.find_elements(By.XPATH, RESULT_LINK_XPATH))
 
 def build_driver(headless=True) -> webdriver.Chrome:
     chrome_opts = Options()
@@ -227,6 +247,7 @@ def switch_into_app_frame(driver):
 
 
 def open_search_panel(driver):
+    logger.info("Opening search panel")
     wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
 
     # Some apps show a splash—give it a breath
@@ -242,7 +263,7 @@ def open_search_panel(driver):
         if els:
             js_click(driver, els[0])
             break
-
+    logger.info("Search panel opened")
     # Expand Address/Location if collapsible
     for xp in [
         "//h2[contains(.,'Address') or contains(.,'Location')]",
@@ -264,77 +285,107 @@ def open_search_panel(driver):
         )
     )
 
-
-def submit_address_and_capture_parcel(driver, raw_address: str) -> str:
-    wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
-    # addr = normalize_address_for_qpublic(raw_address)
-    addr = raw_address
-    field = driver.find_element(
-        By.XPATH, "//input[contains(@id,'Address') or contains(@placeholder,'Address')]"
+def submit_address(driver, raw_address: str) -> str:
+    
+    field = WebDriverWait(driver, 15).until(
+        EC.presence_of_element_located((
+            By.XPATH,
+            "//input[contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'address')]"
+        ))
     )
     field.clear()
-    field.send_keys(addr)
+    field.send_keys(raw_address)
     field.send_keys(Keys.ENTER)
 
-    # Wait for one of: parcel links (grid), parcel detail, or a no-results message
+    # Wait for results to load
+    wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
+
     try:
-        wait.until(EC.any_of(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='KeyValue=']")),
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a#lnkParcel, a[href*='Parcel.aspx']")),
-            EC.presence_of_element_located((By.XPATH, "//*[contains(.,'No results') or contains(.,'No records')]")),
-        ))
-    except TimeoutException:
-        # Some apps use loading overlays—if present, wait for them to vanish briefly, then re-check
-        try:
-            WebDriverWait(driver, 8).until_not(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".loading, .spinner, .k-loading-mask"))
-            )
-        except TimeoutException:
-            pass
-
-    # Case 1: grid with links
-    links = driver.find_elements(By.CSS_SELECTOR, "a[href*='KeyValue=']")
-    if links:
-        href = links[0].get_attribute("href")
-        # Open it in the top window to get a stable URL
-        driver.execute_script("window.top.location = arguments[0];", href)
-        # We switched window context; need to wait to load again
-        WebDriverWait(driver, DEFAULT_TIMEOUT).until(EC.url_contains("KeyValue="))
+        # Wait until at least one parcel/result link shows up
+        wait.until(EC.presence_of_element_located((
+            By.XPATH,
+            "//a[contains(@href,'KeyValue')]"
+        )))
+        # Return the current page URL (search results URL)
         return driver.current_url
+    except Exception:
+        raise RuntimeError(f"results: no parcel links; address not found for '{raw_address}'")
 
-    # Case 2: already on a parcel detail
-    if ("KeyValue=" in driver.current_url) or ("PageTypeID=4" in driver.current_url):
-        return driver.current_url
+# def submit_address(driver, raw_address: str) -> str:
+    
+#     field = WebDriverWait(driver, 15).until(
+#         EC.presence_of_element_located((
+#             By.XPATH,
+#             "//input[contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'address')]"
+#         ))
+#     )
+#     field.clear()
+#     field.send_keys(raw_address)
+#     field.send_keys(Keys.ENTER)
 
-    # Case 3: try a looser query (number + street name, no suffix)
-    m = re.match(r"^\s*(\d+)\s+([A-Z0-9\s\.\-']+)$", addr)
-    if m:
-        pattern = r"\b(AVE|AV|ST|RD|DR|LN|CT|HWY|PKWY|CIR|TRL|TER|WAY|BLVD)\b"
-        loose = f"{m.group(1)} {re.sub(pattern, '', m.group(2)).strip()}"
-        field = driver.find_element(
-            By.XPATH, "//input[contains(@id,'Address') or contains(@placeholder,'Address')]"
+#     # Wait for results to load
+#     wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
+   
+#     try:
+#         # Wait until at least one parcel/result link shows up
+#         wait.until(EC.any_of(
+#             EC.presence_of_element_located((By.XPATH, RESULT_LINK_XPATH)),
+#             EC.presence_of_element_located((By.XPATH, NO_RESULTS_XPATH))
+#         ))
+#         # Return the current page URL (search results URL)
+        
+#         if page_has_no_results_text(driver):
+#             raise RuntimeError(f"results: no parcel links; address not found for '{raw_address}'")
+#         return driver.current_url
+
+#     except TimeoutException:
+#         raise RuntimeError(f"results: no parcel links; address not found for '{raw_address}'")
+
+
+def extract_property_summary(driver, timeout: int = 20) -> dict:
+    """
+    Locate the first table matching:
+      <table class="tabular-data-two-column" role="presentation">...</table>
+    and extract header/value pairs from its rows.
+
+    Returns:
+        OrderedDict[str, str]
+    """
+    # Wait for the table to be present
+    table = WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "table.tabular-data-two-column[role='presentation']")
         )
-        field.clear()
-        field.send_keys(loose)
-        field.send_keys(Keys.ENTER)
+    )
 
-        try:
-            wait.until(EC.any_of(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='KeyValue=']")),
-                EC.presence_of_element_located((By.XPATH, "//*[contains(.,'No results') or contains(.,'No records')]")),
-            ))
-        except TimeoutException:
-            pass
+    def clean(text: str) -> str:
+        if text is None:
+            return ""
+        return text.strip()
 
-        links = driver.find_elements(By.CSS_SELECTOR, "a[href*='KeyValue=']")
-        if links:
-            href = links[0].get_attribute("href")
-            driver.execute_script("window.top.location = arguments[0];", href)
-            WebDriverWait(driver, DEFAULT_TIMEOUT).until(EC.url_contains("KeyValue="))
-            return driver.current_url
+    data = OrderedDict()
 
-    raise RuntimeError("results: no parcel links; address not found")
+    rows = table.find_elements(By.CSS_SELECTOR, "tbody > tr, tr")
+    for r in rows:
+        ths = r.find_elements(By.TAG_NAME, "th")
+        tds = r.find_elements(By.TAG_NAME, "td")
+        if not ths or not tds:
+            continue
 
+        key = clean(ths[0].text)
+        if not key or key.lower() == "view map":
+            continue
+
+        # Preserve original spacing
+        val_text = tds[0].text.strip()
+
+        # Fallback if .text is empty
+        if not val_text:
+            val_text = (tds[0].get_attribute("textContent") or "").strip()
+
+        data[key] = val_text
+
+    return data
 
 def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
     """Main per-row routine with granular error logging."""
@@ -371,24 +422,25 @@ def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
         pass
 
     try:
-        open_search_panel(driver)
-    except Exception as e:
-        row["scrape_error"] = f"inside app: could not open search panel: {type(e).__name__}: {str(e)[:800]}"
-        return row
-
-    try:
-        url = submit_address_and_capture_parcel(driver, ctx.addr)
+        url = submit_address(driver, ctx.addr)
         row["qpublic_report_url"] = url
         row["scrape_error"] = ""
     except Exception as e:
         row["qpublic_report_url"] = ""
         row["scrape_error"] = f"{type(e).__name__}: {str(e)[:800]}"
 
-    # add helpful debug breadcrumbs
-    if ctx.appid:
-        row["qpublic_appid"] = ctx.appid
-    if ctx.visited_url:
-        row["qpublic_visited_url"] = ctx.visited_url
+    try:
+        # Extract property summary table
+        summary = extract_property_summary(driver)
+        if summary:
+            row["parcel_number"] = summary.get("Parcel Number", "")
+            row["property_class"] = summary.get("Class", "")
+            row["property_tax_district"] = summary.get("Tax District", "")
+            row["property_acres"] = summary.get("Acres", "")
+        
+    except Exception as e:
+
+        row["scrape_error"] += f" | summary extraction: {type(e).__name__}: {str(e)[:800]}"
 
     return row
 
@@ -402,7 +454,7 @@ def process_csv(in_path: str, out_path: str, headless=True, limit: Optional[int]
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or []
             # make sure our output columns exist
-            for col in ["qpublic_report_url", "scrape_error", "qpublic_appid", "qpublic_visited_url", "normalized_address_tried"]:
+            for col in ["qpublic_report_url", "parcel_number", "property_class", "property_tax_district", "property_acres", "scrape_error"]:
                 if col not in fieldnames:
                     fieldnames.append(col)
 
@@ -447,3 +499,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # # Want to test the pasge has no result
+    # driver = build_driver(headless=False)
+    # driver.get("https://qpublic.schneidercorp.com/Application.aspx?AppID=791&LayerID=14444&PageTypeID=3&PageID=7423&Q=860457835")
+
+    # if page_has_no_results_text(driver):
+    #     print("No results match your search criteria.")
+    # else:
+    #     print("Results found.")
