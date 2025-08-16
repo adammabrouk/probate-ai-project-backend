@@ -1,498 +1,449 @@
-# qpublic_batch_scraper.py
-# Usage:
-#   python qpublic_batch_scraper.py --in input.csv --out enriched.csv --headful
-#
-# CSV must have at least: County, Street Address, City, State, Zip Code
-#
-# Anti-bot hygiene: randomized UA, human-like typing, jittered waits, retries,
-# reusing a single browser per county (reduces repetitive navigation).
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-import argparse
-import random
-import time
 import re
-import sys
-from typing import Dict, List, Tuple, Optional
-
-import pandas as pd
-from bs4 import BeautifulSoup
+import csv
+import time
+import random
+import argparse
+import logging
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
-    TimeoutException,
     NoSuchElementException,
+    TimeoutException,
     WebDriverException,
-    StaleElementReferenceException,
 )
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.chrome.options import Options
 
-QPUBLIC_ROOT = "https://qpublic.schneidercorp.com/"
+HOME_URL = "https://qpublic.schneidercorp.com/"
+DEFAULT_TIMEOUT = 35
 
-# ---------------------------
-# Small utility helpers
-# ---------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
-def jitter(a: float, b: float) -> float:
-    """Random jitter sleep seconds."""
-    return random.uniform(a, b)
+logger = logging.getLogger(__name__)
 
-def sleepy(a: float, b: float) -> None:
-    time.sleep(jitter(a, b))
+@dataclass
+class RowCtx:
+    row: Dict[str, Any]
+    addr: str
+    county: str
+    state: str = "Georgia"
+    appid: Optional[str] = None
+    visited_url: Optional[str] = None
 
-UA_POOL = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-]
 
-def build_driver(headless: bool) -> webdriver.Chrome:
-    opts = Options()
-    opts.add_argument(f"--user-agent={random.choice(UA_POOL)}")
+def build_driver(headless=True) -> webdriver.Chrome:
+    chrome_opts = Options()
+    if headless:
+        chrome_opts.add_argument("--headless=new")
+    chrome_opts.add_argument("--disable-gpu")
+    chrome_opts.add_argument("--window-size=1400,1000")
+    chrome_opts.add_argument("--no-sandbox")
+    chrome_opts.add_argument("--disable-dev-shm-usage")
+    chrome_opts.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_opts.add_experimental_option("useAutomationExtension", False)
 
-    if not headless:
-        opts.add_argument("--start-maximized")
-    else:
-        opts.add_argument("--headless=new")
-        opts.add_argument("--window-size=1600,1000")
-
-    # Make it look less like automation
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--no-sandbox")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-
-    driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=opts)
-    try:
-        driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {"source": """Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"""}
-        )
-    except Exception:
-        pass
+    driver = webdriver.Chrome(options=chrome_opts)
+    driver.set_page_load_timeout(60)
     return driver
 
-def soup_from_html(html: str) -> BeautifulSoup:
+
+def wait_any_of(wait: WebDriverWait, locators: List[tuple]) -> None:
+    wait.until(EC.any_of(*[EC.presence_of_element_located(l) for l in locators]))
+
+
+def js_click(driver, el):
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
     try:
-        return BeautifulSoup(html, "lxml")
-    except Exception:
-        return BeautifulSoup(html, "html.parser")
-
-def wait_clickable(driver, locator, timeout=25):
-    return WebDriverWait(driver, timeout).until(EC.element_to_be_clickable(locator))
-
-def type_like_human(el, text: str):
-    el.clear()
-    sleepy(0.2, 0.5)
-    for chunk in re.findall(r".{1,6}", text):
-        el.send_keys(chunk)
-        sleepy(0.06, 0.2)
-
-def safe_text(el) -> str:
-    try:
-        return el.get_text(strip=True)
-    except Exception:
-        return ""
-
-def text_or_empty(soup, selector) -> str:
-    node = soup.select_one(selector)
-    return node.get_text(strip=True) if node else ""
-
-def first_or_empty(lst: List[str]) -> str:
-    return lst[0] if lst else ""
-
-# ---------------------------
-# Robust navigation helpers
-# ---------------------------
-
-def _click_property_search_or_go(driver, wait: WebDriverWait) -> None:
-    quick = wait.until(EC.visibility_of_element_located((By.ID, "quickstartList")))
-    link = quick.find_element(By.XPATH, ".//a[.//h3[normalize-space()='Search Records']]")
-    href = link.get_attribute("href")
-    try:
-        link.click()
+        el.click()
     except Exception:
         try:
-            driver.execute_script("arguments[0].click();", link)
+            el.send_keys(Keys.SPACE)
+            el.send_keys(Keys.ENTER)
         except Exception:
-            driver.get(href)
+            pass
+        driver.execute_script("arguments[0].click();", el)
 
+def select_state_and_county(driver, ctx: RowCtx):
+
+    """Use the Local tab's advanced dropdowns to select State + County.
+       Then extract the county AppID for resilient navigation."""
+    wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
+
+    # ensure we're on home
+    if "schneidercorp.com" not in driver.current_url:
+        driver.get(HOME_URL)
+
+    logger.info("Selecting state and county: %s, %s", ctx.state, ctx.county)
+    # Make sure Local tab is active (btnLocal exists)
     try:
-        WebDriverWait(driver, 20).until(lambda d: "PageTypeID=2" in d.current_url)
+        btn_local = wait.until(EC.element_to_be_clickable((By.ID, "btnLocal")))
+        logger.info("Clicking Local tab")
+        js_click(driver, btn_local)
     except TimeoutException:
-        driver.get(href)
-        WebDriverWait(driver, 20).until(lambda d: "PageTypeID=2" in d.current_url)
+        pass  # often Local is already active
 
-    # Terms popup
-    try:
-        WebDriverWait(driver, 6).until(
-            EC.visibility_of_element_located((By.CSS_SELECTOR, "div.modal.in"))
+    # Open State drop and pick
+    state_btn = wait.until(EC.presence_of_element_located((By.ID, "stateMenuButton")))
+    logger.info("Clicking State dropdown")
+    js_click(driver, state_btn)
+    time.sleep(0.2)
+
+    # Find the state option by data-name (e.g., "Georgia")
+    state_option = wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, f"//div[@id='stateMenuContent']//div[@role='option' and @data-name='{ctx.state}']")
         )
-        btn = driver.find_element(
-            By.XPATH, "//div[contains(@class,'modal')]//a[@data-dismiss='modal' and normalize-space()='Agree']"
-        )
-        driver.execute_script("arguments[0].click();", btn)
-        WebDriverWait(driver, 10).until(EC.invisibility_of_element_located((By.CSS_SELECTOR, "div.modal.in")))
-    except Exception:
-        pass
+    )
+    logger.info("Selecting State: %s", ctx.state)
+    js_click(driver, state_option)
 
-def choose_ga_and_county(driver, county_query: str) -> None:
-    """Homepage → Local tab → State=Georgia → pick county → open Real Property Search (+Agree)."""
-    driver.get(QPUBLIC_ROOT)
-    wait = WebDriverWait(driver, 25)
+    # Open Area/County drop and pick
+    area_btn = wait.until(EC.presence_of_element_located((By.ID, "areaMenuButton")))
+    logger.info("Clicking Area/County dropdown")
+    js_click(driver, area_btn)
+    time.sleep(0.2)
 
-    # Local tab
-    try:
-        local = wait.until(EC.presence_of_element_located((By.ID, "btnLocal")))
-        if "active" not in (local.get_attribute("class") or ""):
-            try:
-                local.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", local)
-    except Exception:
-        pass
-
-    # State = Georgia
-    state_input = wait.until(EC.element_to_be_clickable((By.ID, "stateMenuButton")))
-    state_input.click()
-    state_input.send_keys(Keys.CONTROL, "a")
-    state_input.send_keys("Georgia")
-    ga_opt = wait.until(EC.element_to_be_clickable(
-        (By.CSS_SELECTOR, "#stateMenuContent #state-option-Georgia")
-    ))
-    ga_opt.click()
-
-    # County: type then click first valid option
-    county_input = wait.until(EC.element_to_be_clickable((By.ID, "areaMenuButton")))
-    county_input.click()
-    county_input.send_keys(Keys.CONTROL, "a")
-    county_input.send_keys(county_query)
-    area_menu = wait.until(EC.visibility_of_element_located((By.ID, "areaMenuContent")))
-    options = area_menu.find_elements(By.CSS_SELECTOR, ".dropdown-option:not(.no-match):not(.all-option)")
-    if not options:
-        raise RuntimeError(f"No county options matched '{county_query}'.")
-    try:
-        options[0].click()
-    except Exception:
-        driver.execute_script("arguments[0].click();", options[0])
-
-    # Finally go to Real Property Search
-    _click_property_search_or_go(driver, wait)
-
-# ---------------------------
-# Search & scrape per record
-# ---------------------------
-
-def search_address_and_open_first(driver, address: str) -> None:
-    """
-    On Real Property Search page:
-      - type address in 'Search by Location Address'
-      - click Search
-      - if results page (PageTypeID=3), click first result
-      - otherwise, if directly on report (PageTypeID=4), continue
-    """
-    # Focus address input (most GA counties use this ID)
-    addr_input = wait_clickable(driver, (By.ID, "ctlBodyPane_ctl01_ctl01_txtAddress"), timeout=20)
-    type_like_human(addr_input, address)
-
-    # Click address Search
-    wait_clickable(driver, (By.ID, "ctlBodyPane_ctl01_ctl01_btnSearch"), timeout=12).click()
-    sleepy(0.8, 1.6)
-
-    def on_page_type(ptype: str) -> bool:
-        return f"PageTypeID={ptype}" in driver.current_url
-
-    try:
-        WebDriverWait(driver, 18).until(lambda d: on_page_type("3") or on_page_type("4"))
-    except TimeoutException:
-        raise RuntimeError("Search didn't navigate to Results/Report page.")
-
-    if on_page_type("3"):
-        # Click first parcel link
-        try:
-            first_link = WebDriverWait(driver, 12).until(
-                EC.element_to_be_clickable(
-                    (By.XPATH, "//a[contains(@href,'PageTypeID=4') and contains(@href,'KeyValue=')]")
-                )
+    # Exact visible label match like "Atkinson County, GA"
+    # But some labels include two spaces in “County,  GA”, so match loosely
+    area_option = wait.until(
+        EC.presence_of_element_located(
+            (
+                By.XPATH,
+                "//div[@id='areaMenuContent']//div[@role='option' and contains(normalize-space(.), 'County') and contains(., ',') and contains(normalize-space(.), %s)]"
+                % repr(f"{ctx.county} County")
             )
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", first_link)
-            sleepy(0.2, 0.6)
-            try:
-                first_link.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", first_link)
-            WebDriverWait(driver, 15).until(lambda d: on_page_type("4"))
+        )
+    )
+    logger.info("Selecting Area/County: %s", ctx.county)
+    js_click(driver, area_option)
+
+    # Read selected option to capture AppID
+    selected = wait.until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "#areaMenuContent .dropdown-option[aria-selected='true']")
+        )
+    )
+    logger.info("Selected Area/County: %s", selected.text)
+    ctx.appid = selected.get_attribute("data-appid")
+
+
+def navigate_into_app(driver, ctx: RowCtx):
+    """Get into the county application.
+    Prefers Quickstart 'Search Records' tile; falls back to direct Application.aspx?AppID=..."""
+    wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
+
+    # Wait for homepage bits which may render slowly
+    try:
+        logger.info("Waiting for homepage elements to load")
+        wait_any_of(wait, [
+            (By.ID, "quickstartList"),
+            (By.CSS_SELECTOR, "iframe[src*='Application.aspx']"),
+            (By.XPATH, "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]"),
+        ])
+    except TimeoutException:
+        # try direct if we have appid
+        logger.error("Timed out waiting for homepage elements")
+        if ctx.appid:
+            driver.get(f"{HOME_URL}Application.aspx?AppID={ctx.appid}")
+            ctx.visited_url = driver.current_url
+            return
+        raise
+
+    # 1) Try Quickstart "Search Records"
+    try:
+        logger.info("Trying to find Quickstart 'Search Records' link")
+        link = driver.find_element(
+            By.XPATH,
+            "//div[@id='quickstartList']//a[.//h3[normalize-space()='Search Records']]"
+        )
+        href = link.get_attribute("href")
+        if href:
+            driver.get(href)
+            ctx.visited_url = href
+            return
+    except NoSuchElementException:
+        logger.error("Quickstart 'Search Records' link not found")
+        pass
+
+    # 2) If already inside app
+    if "Application.aspx" in driver.current_url:
+        logger.info("Already inside an application page")
+        ctx.visited_url = driver.current_url
+        return
+
+    # 3) Fallback: first Application link on page
+    try:
+        logger.info("Trying to find first Application link on page")
+        fallback = driver.find_element(
+            By.XPATH,
+            "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]"
+        )
+        driver.get(fallback.get_attribute("href"))
+        ctx.visited_url = driver.current_url
+        return
+    except NoSuchElementException:
+        logger.error("No Application link found on page")
+        pass
+
+    # 4) Absolute fallback: construct from AppID
+    if ctx.appid:
+        driver.get(f"{HOME_URL}Application.aspx?AppID={ctx.appid}")
+        ctx.visited_url = driver.current_url
+        return
+
+    raise RuntimeError("after county select: quickstart or app not found")
+
+
+def switch_into_app_frame(driver):
+    # wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
+    # wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "iframe")))
+    # frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+    # # Prefer the first visible one
+    # for fr in frames:
+    #     if fr.is_displayed():
+    #         driver.switch_to.frame(fr)
+    #         return
+    # # else pick the first
+    # driver.switch_to.frame(frames[0])
+
+    # Wait for any <a> tag containing "Agree"
+    agree_btn = WebDriverWait(driver, 15).until(
+        EC.element_to_be_clickable((By.XPATH, "//a[normalize-space()='Agree']"))
+    )
+    driver.execute_script("arguments[0].click();", agree_btn)
+
+
+def open_search_panel(driver):
+    wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
+
+    # Some apps show a splash—give it a breath
+    time.sleep(random.uniform(0.4, 1.0))
+
+    # Try clicking a Search tab/button
+    for by, sel in [
+        (By.XPATH, "//a[normalize-space()='Search']"),
+        (By.XPATH, "//button[normalize-space()='Search']"),
+        (By.CSS_SELECTOR, "[data-tab='search'], .tab-search"),
+    ]:
+        els = driver.find_elements(by, sel)
+        if els:
+            js_click(driver, els[0])
+            break
+
+    # Expand Address/Location if collapsible
+    for xp in [
+        "//h2[contains(.,'Address') or contains(.,'Location')]",
+        "//button[contains(.,'Address') or contains(.,'Location')]",
+    ]:
+        hdrs = driver.find_elements(By.XPATH, xp)
+        if hdrs:
+            # If it looks collapsed, click it
+            klass = hdrs[0].get_attribute("class") or ""
+            aria = hdrs[0].get_attribute("aria-expanded") or ""
+            if "collapsed" in klass or aria == "false":
+                js_click(driver, hdrs[0])
+            break
+
+    # Wait for an address input to appear
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//input[contains(@id,'Address') or contains(@placeholder,'Address')]")
+        )
+    )
+
+
+def submit_address_and_capture_parcel(driver, raw_address: str) -> str:
+    wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
+    # addr = normalize_address_for_qpublic(raw_address)
+    addr = raw_address
+    field = driver.find_element(
+        By.XPATH, "//input[contains(@id,'Address') or contains(@placeholder,'Address')]"
+    )
+    field.clear()
+    field.send_keys(addr)
+    field.send_keys(Keys.ENTER)
+
+    # Wait for one of: parcel links (grid), parcel detail, or a no-results message
+    try:
+        wait.until(EC.any_of(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='KeyValue=']")),
+            EC.presence_of_element_located((By.CSS_SELECTOR, "a#lnkParcel, a[href*='Parcel.aspx']")),
+            EC.presence_of_element_located((By.XPATH, "//*[contains(.,'No results') or contains(.,'No records')]")),
+        ))
+    except TimeoutException:
+        # Some apps use loading overlays—if present, wait for them to vanish briefly, then re-check
+        try:
+            WebDriverWait(driver, 8).until_not(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".loading, .spinner, .k-loading-mask"))
+            )
         except TimeoutException:
-            links = driver.find_elements(By.CSS_SELECTOR, "a[href*='PageTypeID=4'][href*='KeyValue=']")
-            if not links:
-                raise RuntimeError("No parcel links found on Results page.")
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", links[0])
-            sleepy(0.2, 0.6)
-            try:
-                links[0].click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", links[0])
-            WebDriverWait(driver, 15).until(lambda d: on_page_type("4"))
+            pass
 
-# ---------------------------
-# HTML parsing (report page)
-# ---------------------------
+    # Case 1: grid with links
+    links = driver.find_elements(By.CSS_SELECTOR, "a[href*='KeyValue=']")
+    if links:
+        href = links[0].get_attribute("href")
+        # Open it in the top window to get a stable URL
+        driver.execute_script("window.top.location = arguments[0];", href)
+        # We switched window context; need to wait to load again
+        WebDriverWait(driver, DEFAULT_TIMEOUT).until(EC.url_contains("KeyValue="))
+        return driver.current_url
 
-def scrape_two_col_table(tbl: BeautifulSoup) -> Dict[str, str]:
-    out = {}
-    for row in tbl.select("tr"):
-        th = row.find("th")
-        td = row.find("td")
-        if not th or not td:
-            continue
-        label = safe_text(th).strip(": ").replace("\xa0", " ")
-        value = safe_text(td)
-        out[label] = value
-    return out
+    # Case 2: already on a parcel detail
+    if ("KeyValue=" in driver.current_url) or ("PageTypeID=4" in driver.current_url):
+        return driver.current_url
 
-def money_to_int(s: str) -> Optional[int]:
-    s = s.replace(",", "").replace("$", "").strip()
-    return int(s) if s.isdigit() else None
+    # Case 3: try a looser query (number + street name, no suffix)
+    m = re.match(r"^\s*(\d+)\s+([A-Z0-9\s\.\-']+)$", addr)
+    if m:
+        pattern = r"\b(AVE|AV|ST|RD|DR|LN|CT|HWY|PKWY|CIR|TRL|TER|WAY|BLVD)\b"
+        loose = f"{m.group(1)} {re.sub(pattern, '', m.group(2)).strip()}"
+        field = driver.find_element(
+            By.XPATH, "//input[contains(@id,'Address') or contains(@placeholder,'Address')]"
+        )
+        field.clear()
+        field.send_keys(loose)
+        field.send_keys(Keys.ENTER)
 
-def parse_report_html(html: str) -> Dict[str, str]:
-    soup = soup_from_html(html)
+        try:
+            wait.until(EC.any_of(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='KeyValue=']")),
+                EC.presence_of_element_located((By.XPATH, "//*[contains(.,'No results') or contains(.,'No records')]")),
+            ))
+        except TimeoutException:
+            pass
 
-    record: Dict[str, str] = {}
+        links = driver.find_elements(By.CSS_SELECTOR, "a[href*='KeyValue=']")
+        if links:
+            href = links[0].get_attribute("href")
+            driver.execute_script("window.top.location = arguments[0];", href)
+            WebDriverWait(driver, DEFAULT_TIMEOUT).until(EC.url_contains("KeyValue="))
+            return driver.current_url
 
-    # ---------------- Summary ----------------
-    summary_tbl = soup.select_one("#ctlBodyPane_ctl01_ctl01_dynamicSummaryData_divSummary table.tabular-data-two-column")
-    if summary_tbl:
-        summary = scrape_two_col_table(summary_tbl)
-        record["parcel_number"] = summary.get("Parcel Number", "")
-        record["location_address"] = summary.get("Location Address", "")
-        record["legal_description"] = summary.get("Legal Description", "")
-        record["class"] = summary.get("Class", "")
-        record["zoning"] = summary.get("Zoning", "")
-        record["tax_district"] = summary.get("Tax District", "")
-        record["millage_rate"] = summary.get("Millage Rate", "")
-        record["acres"] = summary.get("Acres", "")
-        record["neighborhood"] = summary.get("Neighborhood", "")
-        record["homestead_code"] = summary.get("Homestead Code", "")
-        record["topography"] = summary.get("Topography", "")
+    raise RuntimeError("results: no parcel links; address not found")
 
-    # ---------------- Owner ----------------
-    owner_block = soup.select_one("#ctlBodyPane_ctl02_mSection .module-content")
-    if owner_block:
-        owner_name = text_or_empty(owner_block, "#ctlBodyPane_ctl02_ctl01_rptOwner_ctl00_sprOwnerName1_lnkUpmSearchLinkSuppressed_lblSearch")
-        record["owner_primary_name"] = owner_name
-        owner_addr = text_or_empty(owner_block, "#ctlBodyPane_ctl02_ctl01_rptOwner_ctl00_lblOwnerAddress")
-        lines = [ln.strip() for ln in owner_addr.splitlines() if ln.strip()]
-        record["owner_address_full"] = " ".join(lines)
-        if len(lines) >= 2:
-            record["owner_mailing_line1"] = lines[0]
-            city_state_zip = lines[1]
-            m = re.search(r"^(.*?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$", city_state_zip)
-            if m:
-                record["owner_city"] = m.group(1)
-                record["owner_state"] = m.group(2)
-                record["owner_zip"] = m.group(3)
 
-    # ---------------- Land (first row) ----------------
-    land_row = soup.select_one("#ctlBodyPane_ctl04_ctl01_grdLand_grdFlat tbody tr")
-    if land_row:
-        tds = [td.get_text(strip=True) for td in land_row.select("td")]
-        desc = text_or_empty(land_row, "th")
-        record["land_description"] = desc
-        if len(tds) >= 1: record["land_calc_method"] = tds[0]
-        if len(tds) >= 2: record["land_sqft"] = tds[1]
-        if len(tds) >= 3: record["land_frontage"] = tds[2]
-        if len(tds) >= 4: record["land_depth"] = tds[3]
-        if len(tds) >= 5: record["land_acres_row"] = tds[4]
-        if len(tds) >= 6: record["land_lots"] = tds[5]
+def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
+    """Main per-row routine with granular error logging."""
+    # choose the best address input column available
+    addr = row.get("Street Address") or row.get("pk_street_address") or row.get("owner_address_full") or ""
+    county = (row.get("County") or "").strip()
+    if not county:
+        row["scrape_error"] = "missing County"
+        return row
+    if not addr:
+        row["scrape_error"] = "missing address"
+        return row
 
-    # ---------------- Residential Improvement (left column) ----------------
-    res_left_tbl = soup.select_one("#ctlBodyPane_ctl05_ctl01_lstBuildings_ctl00_dynamicBuildingDataLeftColumn_divSummary table.tabular-data-two-column")
-    if res_left_tbl:
-        res = scrape_two_col_table(res_left_tbl)
-        keys_map = {
-            "Card": "res_card",
-            "Style": "res_style",
-            "Heated Square Feet": "res_heated_sqft",
-            "Exterior Wall": "res_exterior_wall",
-            "Attic Square Feet": "res_attic_sqft",
-            "Finished Bsmt Sqft": "res_finished_bsmt_sqft",
-            "Total Bsmt Sqft": "res_total_bsmt_sqft",
-            "Year Built": "res_year_built",
-            "Roof Type": "res_roof_type",
-            "Flooring Type": "res_flooring_type",
-            "Heating Type": "res_heating_type",
-            "Number of Rooms": "res_rooms",
-            "Number of Bedrooms": "res_bedrooms",
-            "Condition": "res_condition",
-            "Fireplaces\\Appliances": "res_fireplaces_appliances",
-            "Number Of Plumbing Extras": "res_plumbing_extras",
-            "Half Bath (2 Fixture)": "res_half_bath_2_fix",
-            "Full Bath (3 Fixture)": "res_full_bath_3_fix",
-            "Bath (4 Fixture)": "res_bath_4_fix",
-            "Bath (5 Fixture)": "res_bath_5_fix",
-            "Bath (6 Fixture)": "res_bath_6_fix",
-            "Bath (7 Fixture)": "res_bath_7_fix",
-        }
-        for k_src, k_dst in keys_map.items():
-            record[k_dst] = res.get(k_src, "")
+    ctx = RowCtx(row=row, addr=addr, county=county)
 
-    # ---------------- Accessory Information (all rows, flattened) ----------------
-    acc_rows = soup.select("#ctlBodyPane_ctl09_ctl01_lstOBYMaster_ctl00_gvwOBY tbody tr")
-    acc_pieces: List[str] = []
-    for r in acc_rows:
-        cols = [c.get_text(strip=True) for c in r.select("th,td")]
-        if len(cols) >= 5:
-            piece = f"{cols[0]}|{cols[1]}|{cols[2]}|{cols[3]}|{cols[4]}"
-        else:
-            piece = "|".join(cols)
-        acc_pieces.append(piece)
-    record["accessories_concat"] = " || ".join(acc_pieces)
-
-    # ---------------- Valuation - Current Appraised (100%) ----------------
-    appr_row = soup.select_one("#ctlBodyPane_ctl13_ctl01_gvValuationAppr tbody tr")
-    if appr_row:
-        tds = [c.get_text(strip=True) for c in appr_row.select("th,td")]
-        if len(tds) >= 6:
-            record["appr_year"] = tds[0]
-            record["appr_prop_class"] = tds[1]
-            record["appr_luc"] = tds[2]
-            record["appr_land"] = tds[3]
-            record["appr_building"] = tds[4]
-            record["appr_total"] = tds[5]
-
-    # ---------------- Valuation - Current Assessed (40%) ----------------
-    asmt_row = soup.select_one("#ctlBodyPane_ctl14_ctl01_gvValuationAsmt tbody tr")
-    if asmt_row:
-        tds = [c.get_text(strip=True) for c in asmt_row.select("th,td")]
-        if len(tds) >= 4:
-            record["asmt_year"] = tds[0]
-            record["asmt_land"] = tds[1]
-            record["asmt_building"] = tds[2]
-            record["asmt_total"] = tds[3]
-
-    # ---------------- Sketch image (if any) ----------------
-    sketch_img = soup.select_one("#sketchgrid img.rsImg")
-    if sketch_img and sketch_img.has_attr("src"):
-        record["sketch_image_url"] = sketch_img["src"]
-
-    # ---------------- Assessment Notices (buttons) ----------------
-    notice_buttons = soup.select("#ctlBodyPane_ctl16_ctl01_pnlButtonMain input.btn.btn-primary")
-    notice_links = []
-    for btn in notice_buttons:
-        oc = btn.get("onclick", "")
-        m = re.search(r"window\.open\('([^']+)'", oc)
-        if m:
-            notice_links.append(m.group(1))
-    record["assessment_notice_urls"] = " | ".join(notice_links)
-
-    return record
-
-# ---------------------------
-# Orchestration for many rows
-# ---------------------------
-
-def process_one(driver, county: str, address: str) -> Tuple[Dict[str, str], Optional[str]]:
-    """
-    Returns (scraped_record_dict, error_message_if_any)
-    Keeps driver on the Report page at the end.
-    """
     try:
-        # If we're not on Real Property Search for a county, go select it.
-        if "PageTypeID=2" not in driver.current_url:
-            choose_ga_and_county(driver, county)
-
-        search_address_and_open_first(driver, address)
-        sleepy(0.5, 1.2)
-        # Human-ish scroll
-        driver.execute_script("window.scrollTo(0, 400);")
-        sleepy(0.2, 0.6)
-        driver.execute_script("window.scrollTo(0, 0);")
-        html = driver.page_source
-        data = parse_report_html(html)
-        return data, None
+        driver.get(HOME_URL)
+        select_state_and_county(driver, ctx)
     except Exception as e:
-        return {}, f"{type(e).__name__}: {e}"
-
-def run_batch(input_csv: str, output_csv: str, headless: bool) -> None:
-    df = pd.read_csv(input_csv, dtype=str).fillna("")
-    required_cols = ["County", "Street Address"]
-    for col in required_cols:
-        if col not in df.columns:
-            raise SystemExit(f"Input CSV missing required column: {col}")
-
-    out_rows: List[Dict[str, str]] = []
-    driver = build_driver(headless=headless)
-    current_county = None
+        row["scrape_error"] = f"after state/county select: {type(e).__name__}: {str(e)[:800]}"
+        return row
 
     try:
-        for idx, row in df.iterrows():
-            county = row["County"].strip()
-            street = row["Street Address"].strip()
-            street_query = street  # county scoping usually makes street enough
+        navigate_into_app(driver, ctx)
+    except Exception as e:
+        row["scrape_error"] = f"navigation into app: {type(e).__name__}: {str(e)[:800]}"
+        return row
 
-            # Small randomized pause per record
-            sleepy(0.8, 2.2)
+    try:
+        # enter iframe (most Beacon apps)
+        switch_into_app_frame(driver)
+    except Exception as e:
+        # Not fatal—some apps have no visible iframe (rare). Try to proceed.
+        pass
 
-            # If county changed, reopen search for that county
-            if current_county != county:
-                try:
-                    choose_ga_and_county(driver, county)
-                    current_county = county
-                except Exception as e:
-                    enriched = {}
-                    enriched["scrape_error"] = f"Navigation error for county '{county}': {e}"
-                    combined = {**row.to_dict(), **enriched}
-                    out_rows.append(combined)
-                    continue
+    try:
+        open_search_panel(driver)
+    except Exception as e:
+        row["scrape_error"] = f"inside app: could not open search panel: {type(e).__name__}: {str(e)[:800]}"
+        return row
 
-            data, err = process_one(driver, county, street_query)
+    try:
+        url = submit_address_and_capture_parcel(driver, ctx.addr)
+        row["qpublic_report_url"] = url
+        row["scrape_error"] = ""
+    except Exception as e:
+        row["qpublic_report_url"] = ""
+        row["scrape_error"] = f"{type(e).__name__}: {str(e)[:800]}"
 
-            enriched = data.copy()
-            enriched["qpublic_report_url"] = driver.current_url if data else ""
-            enriched["scrape_error"] = err or ""
+    # add helpful debug breadcrumbs
+    if ctx.appid:
+        row["qpublic_appid"] = ctx.appid
+    if ctx.visited_url:
+        row["qpublic_visited_url"] = ctx.visited_url
 
-            # Attach your primary key columns
-            enriched["pk_county"] = county
-            enriched["pk_street_address"] = street
+    return row
 
-            combined = {**row.to_dict(), **enriched}
-            out_rows.append(combined)
 
-            # Random dwell / motion
-            sleepy(0.6, 1.8)
-            if random.random() < 0.25:
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight * Math.random());")
-                sleepy(0.2, 0.5)
+def process_csv(in_path: str, out_path: str, headless=True, limit: Optional[int] = None):
+    driver = build_driver(headless=headless)
+    rows: List[Dict[str, Any]] = []
 
-        # Normalize and write CSV
-        out_df = pd.DataFrame(out_rows)
-        orig_cols = list(df.columns)
-        new_cols = [c for c in out_df.columns if c not in orig_cols]
-        ordered_cols = orig_cols + sorted(new_cols)
-        out_df = out_df.reindex(columns=ordered_cols)
-        out_df.to_csv(output_csv, index=False)
+    try:
+        with open(in_path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            # make sure our output columns exist
+            for col in ["qpublic_report_url", "scrape_error", "qpublic_appid", "qpublic_visited_url", "normalized_address_tried"]:
+                if col not in fieldnames:
+                    fieldnames.append(col)
 
+            with open(out_path, "w", newline="", encoding="utf-8") as wf:
+                writer = csv.DictWriter(wf, fieldnames=fieldnames)
+                writer.writeheader()
+
+                for i, row in enumerate(reader):
+                    if limit and i >= limit:
+                        break
+                    try:
+                        logger.debug("Processing row %d: %s", i + 1, row)
+                        enriched = enrich_row(driver, dict(row))
+                    except WebDriverException as e:
+                        # Hard browser failure—retry once with a fresh driver
+                        try:
+                            driver.quit()
+                        except Exception:
+                            pass
+                        driver = build_driver(headless=headless)
+                        enriched = enrich_row(driver, dict(row))
+                    writer.writerow(enriched)
+                    # polite jitter between rows
+                    time.sleep(random.uniform(0.4, 1.0))
     finally:
         try:
             driver.quit()
         except Exception:
             pass
 
-def main():
-    parser = argparse.ArgumentParser(description="qPublic batch scraper → one-row-per-input CSV.")
-    parser.add_argument("--in", dest="in_csv", required=True, help="Input CSV path")
-    parser.add_argument("--out", dest="out_csv", required=True, help="Output CSV path")
-    parser.add_argument("--headful", action="store_true", help="Run with visible Chrome (default headless)")
-    args = parser.parse_args()
 
-    run_batch(args.in_csv, args.out_csv, headless=not args.headful)
+def main():
+    ap = argparse.ArgumentParser(description="qPublic/Beacon parcel URL scraper (resilient).")
+    ap.add_argument("--in", dest="in_path", required=True, help="Input CSV path")
+    ap.add_argument("--out", dest="out_path", required=True, help="Output CSV path")
+    ap.add_argument("--headed", action="store_true", help="Run with a visible browser")
+    ap.add_argument("--limit", type=int, default=None, help="Optional: max rows to process")
+    args = ap.parse_args()
+
+    process_csv(args.in_path, args.out_path, headless=(not args.headed), limit=args.limit)
+
 
 if __name__ == "__main__":
     main()
