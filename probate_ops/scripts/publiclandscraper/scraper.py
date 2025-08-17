@@ -346,7 +346,7 @@ def submit_address(driver, raw_address: str) -> str:
 #         raise RuntimeError(f"results: no parcel links; address not found for '{raw_address}'")
 
 
-def extract_property_summary(driver, timeout: int = 20) -> dict:
+def extract_property_summary(driver, timeout: int = 2) -> dict:
     """
     Locate the first table matching:
       <table class="tabular-data-two-column" role="presentation">...</table>
@@ -356,16 +356,20 @@ def extract_property_summary(driver, timeout: int = 20) -> dict:
         OrderedDict[str, str]
     """
     # Wait for the table to be present
-    table = WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "table.tabular-data-two-column[role='presentation']")
-        )
-    )
-
     def clean(text: str) -> str:
         if text is None:
             return ""
         return text.strip()
+
+    try: 
+        table = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "table.tabular-data-two-column[role='presentation']")
+            )
+        )
+    except TimeoutException:
+        logger.error("Property summary table not found within timeout")
+        return {}
 
     data = OrderedDict()
 
