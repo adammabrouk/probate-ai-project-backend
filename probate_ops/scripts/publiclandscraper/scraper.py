@@ -446,6 +446,60 @@ def extract_property_summary(driver, timeout: int = 2) -> dict:
     return data
 
 
+# Valuation extraction functions
+def find_valuation_section(driver):
+    # find all sections like ctlBodyPane_ctl12_mSection / ctlBodyPane_ctl13_mSection
+    sections = driver.find_elements(By.CSS_SELECTOR, "section[id^='ctlBodyPane_ctl'][id$='_mSection']")
+    for sec in sections:
+        # header title div like <div ... class="title">Valuation</div>
+        titles = sec.find_elements(By.CSS_SELECTOR, "header .title")
+        if titles and "valuation" in titles[0].text.strip().lower():
+            return sec
+    return None
+
+def extract_current_value_by_year(driver):
+    sec = find_valuation_section(driver)
+    if not sec:
+        return {}
+
+    # valuation table (id contains grdValuation)
+    tables = sec.find_elements(By.CSS_SELECTOR, "table[id*='grdValuation']")
+    if not tables:
+        return {}
+
+    table = tables[0]
+
+    # years from THEAD (last header row)
+    header_rows = table.find_elements(By.CSS_SELECTOR, "thead tr")
+    if not header_rows:
+        return {}
+
+    header_cells = header_rows[-1].find_elements(By.CSS_SELECTOR, "th, td")
+    # skip first two columns (toggle + row label); keep visible year labels
+    years = []
+    for c in header_cells:
+        t = c.text.strip()
+        if t.isdigit():  # e.g., 2024, 2023...
+            years.append(t)
+
+    # find "Current Value" row in TBODY
+    current_rows = table.find_elements(
+        By.XPATH, ".//tbody/tr[th[contains(normalize-space(.), 'Current')]]"
+    )
+    if not current_rows:
+        return {}
+
+    # cells after the label cell correspond to each year
+    tds = current_rows[0].find_elements(By.CSS_SELECTOR, "td.value-column")
+    values = [td.text.strip() for td in tds]
+
+    # align lengths safely from the right (some views hide older years)
+    if len(values) < len(years):
+        years = years[-len(values):]
+    data = dict(zip(years, values))
+    return data
+
+
 def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
     """Main per-row routine with granular error logging."""
     # choose the best address input column available
@@ -603,12 +657,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    # # Want to test the pasge has no result
-    # driver = build_driver(headless=False)
-    # driver.get("https://qpublic.schneidercorp.com/Application.aspx?AppID=791&LayerID=14444&PageTypeID=3&PageID=7423&Q=860457835")
+    # main()
+    # Want to test the pasge has no result
+    driver = build_driver(headless=False)
+    driver.get("https://qpublic.schneidercorp.com/Application.aspx?AppID=634&LayerID=11214&PageTypeID=4&PageID=4613&Q=85318929&KeyValue=0021++092")
 
-    # if page_has_no_results_text(driver):
-    #     print("No results match your search criteria.")
-    # else:
-    #     print("Results found.")
+    # click on agree button
+    switch_into_app_frame(driver)
+    print(extract_current_value_by_year(driver))
+    
