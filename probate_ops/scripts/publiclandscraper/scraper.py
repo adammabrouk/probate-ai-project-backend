@@ -173,6 +173,7 @@ def navigate_into_app(driver, ctx: RowCtx):
             (By.CSS_SELECTOR, "iframe[src*='Application.aspx']"),
             (By.XPATH, "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]"),
         ])
+        logger.info("Homepage elements loaded")
     except TimeoutException:
         # try direct if we have appid
         logger.error("Timed out waiting for homepage elements")
@@ -190,6 +191,7 @@ def navigate_into_app(driver, ctx: RowCtx):
             "//div[@id='quickstartList']//a[.//h3[normalize-space()='Search Records']]"
         )
         href = link.get_attribute("href")
+        logger.info("Found Quickstart 'Search Records' link: %s", href)
         if href:
             driver.get(href)
             ctx.visited_url = href
@@ -198,33 +200,33 @@ def navigate_into_app(driver, ctx: RowCtx):
         logger.error("Quickstart 'Search Records' link not found")
         pass
 
-    # 2) If already inside app
-    if "Application.aspx" in driver.current_url:
-        logger.info("Already inside an application page")
-        ctx.visited_url = driver.current_url
-        return
+    # # 2) If already inside app
+    # if "Application.aspx" in driver.current_url:
+    #     logger.info("Already inside an application page")
+    #     ctx.visited_url = driver.current_url
+    #     return
 
-    # 3) Fallback: first Application link on page
-    try:
-        logger.info("Trying to find first Application link on page")
-        fallback = driver.find_element(
-            By.XPATH,
-            "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]"
-        )
-        driver.get(fallback.get_attribute("href"))
-        ctx.visited_url = driver.current_url
-        return
-    except NoSuchElementException:
-        logger.error("No Application link found on page")
-        pass
+    # # 3) Fallback: first Application link on page
+    # try:
+    #     logger.info("Trying to find first Application link on page")
+    #     fallback = driver.find_element(
+    #         By.XPATH,
+    #         "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]"
+    #     )
+    #     driver.get(fallback.get_attribute("href"))
+    #     ctx.visited_url = driver.current_url
+    #     return
+    # except NoSuchElementException:
+    #     logger.error("No Application link found on page")
+    #     pass
 
-    # 4) Absolute fallback: construct from AppID
-    if ctx.appid:
-        driver.get(f"{HOME_URL}Application.aspx?AppID={ctx.appid}")
-        ctx.visited_url = driver.current_url
-        return
+    # # 4) Absolute fallback: construct from AppID
+    # if ctx.appid:
+    #     driver.get(f"{HOME_URL}Application.aspx?AppID={ctx.appid}")
+    #     ctx.visited_url = driver.current_url
+    #     return
 
-    raise RuntimeError("after county select: quickstart or app not found")
+    # raise RuntimeError("after county select: quickstart or app not found")
 
 
 def switch_into_app_frame(driver):
@@ -240,7 +242,8 @@ def switch_into_app_frame(driver):
     # driver.switch_to.frame(frames[0])
 
     # Wait for any <a> tag containing "Agree"
-    agree_btn = WebDriverWait(driver, 15).until(
+    logger.info("Waiting for 'Agree' button in iframe")
+    agree_btn = WebDriverWait(driver, 2).until(
         EC.element_to_be_clickable((By.XPATH, "//a[normalize-space()='Agree']"))
     )
     driver.execute_script("arguments[0].click();", agree_btn)
@@ -287,7 +290,7 @@ def open_search_panel(driver):
 
 def submit_address(driver, raw_address: str) -> str:
     
-    field = WebDriverWait(driver, 15).until(
+    field = WebDriverWait(driver, DEFAULT_TIMEOUT).until(
         EC.presence_of_element_located((
             By.XPATH,
             "//input[contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'address')]"
@@ -298,7 +301,7 @@ def submit_address(driver, raw_address: str) -> str:
     field.send_keys(Keys.ENTER)
 
     # Wait for results to load
-    wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
+    wait = WebDriverWait(driver, 2)
 
     try:
         # Wait until at least one parcel/result link shows up
@@ -309,6 +312,7 @@ def submit_address(driver, raw_address: str) -> str:
         # Return the current page URL (search results URL)
         return driver.current_url
     except Exception:
+        logger.error("No parcel links found after submitting address: %s", raw_address)
         raise RuntimeError(f"results: no parcel links; address not found for '{raw_address}'")
 
 # def submit_address(driver, raw_address: str) -> str:
@@ -427,7 +431,8 @@ def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
         row["scrape_error"] = ""
     except Exception as e:
         row["qpublic_report_url"] = ""
-        row["scrape_error"] = f"{type(e).__name__}: {str(e)[:800]}"
+        row["scrape_error"] = f"No Data for Given Address"
+        return row
 
     try:
         # Extract property summary table
