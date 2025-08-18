@@ -447,57 +447,110 @@ def extract_property_summary(driver, timeout: int = 2) -> dict:
 
 
 # Valuation extraction functions
-def find_valuation_section(driver):
-    # find all sections like ctlBodyPane_ctl12_mSection / ctlBodyPane_ctl13_mSection
-    sections = driver.find_elements(By.CSS_SELECTOR, "section[id^='ctlBodyPane_ctl'][id$='_mSection']")
+def _find_section_by_exact_title(driver, title_text):
+    # search all sections and match the header .title text exactly (case-insensitive)
+    sections = driver.find_elements(
+        By.CSS_SELECTOR, "section[id^='ctlBodyPane_ctl'][id$='_mSection']"
+    )
     for sec in sections:
-        # header title div like <div ... class="title">Valuation</div>
         titles = sec.find_elements(By.CSS_SELECTOR, "header .title")
-        if titles and "valuation" in titles[0].text.strip().lower():
+        if (
+            titles
+            and titles[0].text.strip().lower() == title_text.strip().lower()
+        ):
             return sec
     return None
 
-def extract_current_value_by_year(driver):
-    sec = find_valuation_section(driver)
+
+def _clean_money(s):
+    # remove '$' but keep thousands separators, as in your desired output
+    return s.replace("$", "").strip()
+
+
+def extract_evaluation_appraised(driver):
+    """Extract ALL years and total appraised values from Valuation (Appraised 100%)."""
+    sec = _find_section_by_exact_title(driver, "Valuation (Appraised 100%)")
     if not sec:
         return {}
 
-    # valuation table (id contains grdValuation)
-    tables = sec.find_elements(By.CSS_SELECTOR, "table[id*='grdValuation']")
-    if not tables:
-        return {}
+    data = {}
 
-    table = tables[0]
-
-    # years from THEAD (last header row)
-    header_rows = table.find_elements(By.CSS_SELECTOR, "thead tr")
-    if not header_rows:
-        return {}
-
-    header_cells = header_rows[-1].find_elements(By.CSS_SELECTOR, "th, td")
-    # skip first two columns (toggle + row label); keep visible year labels
-    years = []
-    for c in header_cells:
-        t = c.text.strip()
-        if t.isdigit():  # e.g., 2024, 2023...
-            years.append(t)
-
-    # find "Current Value" row in TBODY
-    current_rows = table.find_elements(
-        By.XPATH, ".//tbody/tr[th[contains(normalize-space(.), 'Current')]]"
+    # Collect both current + historical tables
+    tables = []
+    # tables += sec.find_elements(By.CSS_SELECTOR, "table[id*='_gvValuationHistoricalAppr']")
+    tables += sec.find_elements(
+        By.CSS_SELECTOR, "table[id*='gvValuationAppr']"
     )
-    if not current_rows:
-        return {}
+    logger.info("Found %d valuation tables", len(tables))
+    for table in tables:
+        rows = table.find_elements(By.CSS_SELECTOR, "tbody tr[valign='top']")
+        for r in rows:
+            # year is the text inside the th.a
+            year_cell = r.find_elements(By.CSS_SELECTOR, "th[scope='row']")
+            if not year_cell:
+                continue
 
-    # cells after the label cell correspond to each year
-    tds = current_rows[0].find_elements(By.CSS_SELECTOR, "td.value-column")
-    values = [td.text.strip() for td in tds]
+            year_text = year_cell[0].text.strip()
+            year = "".join(ch for ch in year_text if ch.isdigit())
+            if not year:
+                continue
 
-    # align lengths safely from the right (some views hide older years)
-    if len(values) < len(years):
-        years = years[-len(values):]
-    data = dict(zip(years, values))
+            tds = r.find_elements(By.CSS_SELECTOR, "td")
+            if not tds:
+                continue
+            total_value = tds[-1].text.strip()
+            if total_value:
+                data[year] = _clean_money(total_value)
+
     return data
+
+
+def extract_valuation_std(driver):
+    # ----- Case A: Valuation (assessed “Current Value”) -----
+    sec = _find_section_by_exact_title(driver, "Valuation")
+    if sec:
+        tables = sec.find_elements(
+            By.CSS_SELECTOR, "table[id*='grdValuation']"
+        )
+        if not tables:
+            return {}
+        table = tables[0]
+
+        # years from last header row
+        header_rows = table.find_elements(By.CSS_SELECTOR, "thead tr")
+        if not header_rows:
+            return {}
+        header_cells = header_rows[-1].find_elements(By.CSS_SELECTOR, "th, td")
+        years = [
+            c.text.strip() for c in header_cells if c.text.strip().isdigit()
+        ]
+
+        # "Current Value" row
+        cur = table.find_elements(
+            By.XPATH, ".//tbody/tr[th[contains(normalize-space(.),'Current')]]"
+        )
+        if not cur:
+            return {}
+        vals = [
+            td.text.strip()
+            for td in cur[0].find_elements(By.CSS_SELECTOR, "td.value-column")
+        ]
+
+        # align from right in case some columns are hidden
+        if len(vals) < len(years):
+            years = years[-len(vals) :]
+
+        return {y: _clean_money(v) for y, v in zip(years, vals)}
+
+    return {}  # nothing found
+
+
+def extract_valuation_any(driver):
+
+    return {
+        **extract_evaluation_appraised(driver),
+        **extract_valuation_std(driver),
+    }
 
 
 def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -567,6 +620,22 @@ def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
             "scrape_error"
         ] += f" | summary extraction: {type(e).__name__}: {str(e)[:800]}"
 
+    # Extract valuation data
+
+    try:
+        valuation_dict = extract_valuation_any(driver)
+
+        for year in range(2025, 2019, -1):
+            key = f"property_value_{year}"
+            if str(year) in valuation_dict:
+                row[key] = valuation_dict[str(year)]
+            else:
+                row[key] = ""
+    except Exception as e:
+        row[
+            "scrape_error"
+        ] += f" | valuation extraction: {type(e).__name__}: {str(e)[:800]}"
+
     try:
         img = extract_property_image(driver)
         if img:
@@ -579,11 +648,34 @@ def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+# Decorator for keeping checkpoint of processed rows
+def checkpoint_cache(func):
+    def wrapper(*args, **kwargs):
+        in_path, out_path = kwargs["in_path"], kwargs["out_path"]
+        checkpoint_file = f"{in_path}_{out_path}.checkpoint"
+        try:
+            with open(checkpoint_file, "r") as f:
+                start_from = int(f.read().strip())
+        except FileNotFoundError:
+            start_from = 0
+        
+        kwargs["start_from"] = start_from
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@checkpoint_cache
 def process_csv(
-    in_path: str, out_path: str, headless=True, limit: Optional[int] = None
+    in_path: str,
+    out_path: str,
+    headless=True,
+    limit: Optional[int] = None,
+    start_from: Optional[int] = 0,
 ):
     driver = build_driver(headless=headless)
     rows: List[Dict[str, Any]] = []
+    logger.info("Starting From", start_from)
 
     try:
         with open(in_path, newline="", encoding="utf-8-sig") as f:
@@ -595,6 +687,12 @@ def process_csv(
                 "parcel_number",
                 "property_class",
                 "property_tax_district",
+                "property_value_2025",
+                "property_value_2024",
+                "property_value_2023",
+                "property_value_2022",
+                "property_value_2021",
+                "property_value_2020",
                 "property_acres",
                 "property_image",
                 "scrape_error",
@@ -602,13 +700,18 @@ def process_csv(
                 if col not in fieldnames:
                     fieldnames.append(col)
 
-            with open(out_path, "w", newline="", encoding="utf-8") as wf:
+            # open checkpint file as well
+            checkpoint_file = f"{in_path}_{out_path}.checkpoint"
+            with open(out_path, "a", newline="", encoding="utf-8") as wf:
                 writer = csv.DictWriter(wf, fieldnames=fieldnames)
-                writer.writeheader()
+                if start_from == 0:
+                    writer.writeheader()
 
                 for i, row in enumerate(reader):
                     if limit and i >= limit:
                         break
+                    if i < start_from:
+                        continue
                     try:
                         logger.debug("Processing row %d: %s", i + 1, row)
                         enriched = enrich_row(driver, dict(row))
@@ -620,7 +723,12 @@ def process_csv(
                             pass
                         driver = build_driver(headless=headless)
                         enriched = enrich_row(driver, dict(row))
+
                     writer.writerow(enriched)
+                    with open(
+                        checkpoint_file, "w", encoding="utf-8"
+                    ) as cp_file:
+                        cp_file.write(str(i + 1) + "\n")
                     # polite jitter between rows
                     time.sleep(random.uniform(0.4, 1.0))
     finally:
@@ -649,20 +757,12 @@ def main():
     args = ap.parse_args()
 
     process_csv(
-        args.in_path,
-        args.out_path,
+        in_path=args.in_path,
+        out_path=args.out_path,
         headless=(not args.headed),
         limit=args.limit,
     )
 
 
 if __name__ == "__main__":
-    # main()
-    # Want to test the pasge has no result
-    driver = build_driver(headless=False)
-    driver.get("https://qpublic.schneidercorp.com/Application.aspx?AppID=634&LayerID=11214&PageTypeID=4&PageID=4613&Q=85318929&KeyValue=0021++092")
-
-    # click on agree button
-    switch_into_app_frame(driver)
-    print(extract_current_value_by_year(driver))
-    
+    main()
