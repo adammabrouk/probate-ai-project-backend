@@ -1,23 +1,48 @@
-from fastapi import APIRouter
+# import the UploadFile class for handling file uploads
+import csv
+from fastapi import UploadFile, APIRouter, WebSocket, File, Form
 from pydantic import BaseModel
-from ..core.registry import registry
-from ..core.storage import sqlstore
+from probate_ops.flows.dataviz import graph
 
 router = APIRouter()
 
 class AskReq(BaseModel):
+    thread_id: str
     question: str
-    mode: str | None = None   # "sql" | "df" | None (let LLM choose)
+    file: UploadFile  # Uncomment if you want to handle file uploads  
 
 @router.post("/ask")
-def ask(req: AskReq):
+async def ask(
+    question: str = Form(...),
+    file: UploadFile = File(...),  # Uncomment if you want to handle file uploads
+    thread_id: str = Form(...)
+    ):
     # Minimal heuristic: prefer SQL for counts/group-bys; otherwise DF
-    if req.mode == "sql" or ("count" in req.question.lower() or "top" in req.question.lower()):
-        sql = "SELECT county, COUNT(*) AS n FROM records GROUP BY county ORDER BY n DESC LIMIT 10"
-        res = registry.call("run_sql", query=sql)
-        return {"answer": "Top counties by record count", "sql_used": sql, **res}
-    # Demo DF op
-    import pandas as pd
-    df = sqlstore.query("SELECT * FROM records")
-    res = registry.call("run_df", df=df, op="count_by", by="petition_type")
-    return {"answer": "Count by petition type", "data": res["rows"]}
+
+    state = {
+        "question": question,
+        "file": csv.DictReader(
+            (await file.read()).decode("utf-8").splitlines()
+        )
+    }
+    
+    # Execute the workflow
+    
+    result = await graph.ainvoke(
+        state,
+        config={"thread_id": thread_id}
+    )
+    return result["file_schema"]
+
+@router.websocket("/ws/{thread_id}")
+async def websocket_endpoint(websocket: WebSocket, thread_id: str):
+    config = {
+        "configurable": {
+            "thread_id": thread_id
+        }
+    }
+    await websocket.accept()
+    while True:
+        data = await websocket.receive_text()
+        async for event in graph.astream({"file_schema": [data]}, config=config, stream_mode="messages"):
+            await websocket.send_text(event[0].content)
