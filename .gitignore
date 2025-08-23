@@ -1,2 +1,6 @@
 .venv/
 __pycache__/
+*.db
+*.checkpoint
+*.csv
+*.xlsx
