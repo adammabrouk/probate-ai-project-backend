@@ -5,8 +5,10 @@ from ..flows.full_enrich import build_graph
 router = APIRouter()
 graph = build_graph()
 
+
 class FlowReq(BaseModel):
     records: list[dict]
+
 
 @router.post("/flows/score")
 def run_flow(req: FlowReq):

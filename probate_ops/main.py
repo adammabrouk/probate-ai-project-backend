@@ -29,5 +29,7 @@ app.include_router(analyze.router)
 app.include_router(ask.router)
 app.include_router(flows.router)
 
+
 @app.get("/health")
-def health(): return {"ok": True}
+def health():
+    return {"ok": True}

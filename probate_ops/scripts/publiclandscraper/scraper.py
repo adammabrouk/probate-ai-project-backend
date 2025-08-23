@@ -658,7 +658,7 @@ def checkpoint_cache(func):
                 start_from = int(f.read().strip())
         except FileNotFoundError:
             start_from = 0
-        
+
         kwargs["start_from"] = start_from
         return func(*args, **kwargs)
 

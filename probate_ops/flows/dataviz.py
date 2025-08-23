@@ -10,6 +10,7 @@ from probate_ops.core.settings import settings
 
 # ─────────────────── Models & State ───────────────────
 
+
 class QuestionParserResponse(BaseModel):
     is_relevant: bool
     relevant_fields: List[str] = []
@@ -23,13 +24,12 @@ class State(TypedDict):
 
 # ─────────────────── Agent ───────────────────
 
+
 class DataVizAgent:
     def __init__(self):
         self.tool_registry = ToolRegistry()
         self.llm = ChatOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            model="gpt-4o-mini",
-            temperature=0
+            api_key=settings.OPENAI_API_KEY, model="gpt-4o-mini", temperature=0
         )
 
     def parse_question(self, state: "State"):
@@ -41,20 +41,30 @@ class DataVizAgent:
             "is_relevant to False."
         )
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "CSV schema: {file_schema}\nQuestion: {question}")
-        ])
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", "CSV schema: {file_schema}\nQuestion: {question}"),
+            ]
+        )
 
-        chain = prompt | self.llm.with_structured_output(QuestionParserResponse)
+        chain = prompt | self.llm.with_structured_output(
+            QuestionParserResponse
+        )
 
         # Prefer explicit schema if present; otherwise try to read from DictReader
-        schema = state.get("file_schema") or getattr(state["file"], "fieldnames", None) or []
+        schema = (
+            state.get("file_schema")
+            or getattr(state["file"], "fieldnames", None)
+            or []
+        )
 
-        response: QuestionParserResponse = chain.invoke({
-            "file_schema": ", ".join(schema),
-            "question": state["question"],
-        })
+        response: QuestionParserResponse = chain.invoke(
+            {
+                "file_schema": ", ".join(schema),
+                "question": state["question"],
+            }
+        )
 
         # Return ONLY the updates to state
         return {"file_schema": response.relevant_fields}
@@ -66,5 +76,6 @@ class DataVizAgent:
         workflow.set_entry_point("parse_question")
         workflow.add_edge("parse_question", END)
         return workflow.compile()
+
 
 graph = DataVizAgent().create_workflow()
