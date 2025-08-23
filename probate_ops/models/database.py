@@ -67,7 +67,7 @@ class ProbateRecord(Model):
             "parcel_number" : data.get("parcel_number"),
             "property_class" : data.get("property_class"),
             "property_tax_district" : data.get("property_tax_district"),
-            "property_value" : float(data.get("property_value_2025")) if data.get("property_value_2025") else None,
+            "property_value" : float(data.get("property_value_2025").replace(",","").replace("$","")) if data.get("property_value_2025") else None,
             "property_acres" : float(data.get("property_acres")) if data.get("property_acres") else None,
             "property_image" : data.get("property_image"),
             "absentee_flag" : None,  # Needs custom logic to determine
