@@ -222,33 +222,33 @@ def navigate_into_app(driver, ctx: RowCtx):
         logger.error("Quickstart 'Search Records' link not found")
         pass
 
-    # # 2) If already inside app
-    # if "Application.aspx" in driver.current_url:
-    #     logger.info("Already inside an application page")
-    #     ctx.visited_url = driver.current_url
-    #     return
+    # 2) If already inside app
+    if "Application.aspx" in driver.current_url:
+        logger.info("Already inside an application page")
+        ctx.visited_url = driver.current_url
+        return
 
-    # # 3) Fallback: first Application link on page
-    # try:
-    #     logger.info("Trying to find first Application link on page")
-    #     fallback = driver.find_element(
-    #         By.XPATH,
-    #         "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]"
-    #     )
-    #     driver.get(fallback.get_attribute("href"))
-    #     ctx.visited_url = driver.current_url
-    #     return
-    # except NoSuchElementException:
-    #     logger.error("No Application link found on page")
-    #     pass
+    # 3) Fallback: first Application link on page
+    try:
+        logger.info("Trying to find first Application link on page")
+        fallback = driver.find_element(
+            By.XPATH,
+            "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]"
+        )
+        driver.get(fallback.get_attribute("href"))
+        ctx.visited_url = driver.current_url
+        return
+    except NoSuchElementException:
+        logger.error("No Application link found on page")
+        pass
 
-    # # 4) Absolute fallback: construct from AppID
-    # if ctx.appid:
-    #     driver.get(f"{HOME_URL}Application.aspx?AppID={ctx.appid}")
-    #     ctx.visited_url = driver.current_url
-    #     return
+    # 4) Absolute fallback: construct from AppID
+    if ctx.appid:
+        driver.get(f"{HOME_URL}Application.aspx?AppID={ctx.appid}")
+        ctx.visited_url = driver.current_url
+        return
 
-    # raise RuntimeError("after county select: quickstart or app not found")
+    raise RuntimeError("after county select: quickstart or app not found")
 
 
 def switch_into_app_frame(driver):
