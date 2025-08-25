@@ -44,12 +44,15 @@ class CountyAverageValue(BaseModel):
 class CountyAverageValueResponse(BaseModel):
     averageValueByCounty: List[CountyAverageValue]
 
-class BinnedDaysSincePetition(BaseModel):
+class BinnedDaysCount(BaseModel):
     bin: str
     count: int
 
 class BinnedDaysSincePetitionResponse(BaseModel):
-    binnedDaysSincePetition: List[BinnedDaysSincePetition]
+    daysSincePetitionHist: List[BinnedDaysCount]
+
+class BinnedDaysDeathToPetitionResponse(BaseModel):
+    daysDeathToPetitionHist: List[BinnedDaysCount]
 
 @router.get("/kpis")
 def get_kpis():
@@ -225,5 +228,48 @@ def binned_days_since_petition():
     )
 
     return BinnedDaysSincePetitionResponse(
-        binnedDaysSincePetition=[BinnedDaysSincePetition(**row) for row in q]
+        daysSincePetitionHist=[BinnedDaysCount(**row) for row in q]
+    )
+
+# Same graph but with difference between petition date and death date
+@router.get("/binned-days-petition-to-death")
+def binned_days_petition_to_death():
+    bins = [
+        (0, 30, "0-30 days"),
+        (31, 60, "31-60 days"),
+        (61, 90, "61-90 days"),
+        (91, 180, "91-180 days"),
+        (181, 365, "181-365 days"),
+        (366, 10**6, "> 1 year"),
+    ]
+
+    # Postgres: days since = date_part('day', age(petition_date, death_date))
+    days_between = fn.DATE(ProbateRecord.petition_date) - fn.DATE(ProbateRecord.death_date)
+
+    # CASE expression for binning
+    bin_cases = Case(
+        None,
+        [
+            ((days_between >= low) & (days_between <= high), Value(label))
+            for (low, high, label) in bins
+        ],
+        Value("Unknown"),
+    ).alias("bin")
+
+    count_expr = fn.COUNT(1).alias("count")
+
+    q = (
+        ProbateRecord
+        .select(bin_cases, count_expr)
+        .where(
+            (ProbateRecord.petition_date.is_null(False)) &
+            (ProbateRecord.death_date.is_null(False))
+        )
+        .group_by(bin_cases)          # reuse the same expression you selected
+        .order_by(count_expr.desc())  # reuse the same count expression
+        .dicts()
+    )
+
+    return BinnedDaysDeathToPetitionResponse(
+        daysDeathToPetitionHist=[BinnedDaysCount(**row) for row in q]
     )
