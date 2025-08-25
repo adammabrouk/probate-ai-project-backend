@@ -17,8 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app = FastAPI(title="ProbateOps API")
-
 # register tools
 registry.register("run_sql", run_sql)
 registry.register("run_df", run_df)

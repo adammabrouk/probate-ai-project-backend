@@ -12,7 +12,7 @@ async def upload(file: UploadFile = File(...)):
 
     records = []
     with StringIO(content.decode()) as data:
-        reader = csv.DictReader(data)        
+        reader = csv.DictReader(data)
         for row in reader:
             try:
                 records.append(ProbateRecord.from_dict(row))
