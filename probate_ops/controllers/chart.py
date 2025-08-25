@@ -54,6 +54,22 @@ class BinnedDaysSincePetitionResponse(BaseModel):
 class BinnedDaysDeathToPetitionResponse(BaseModel):
     daysDeathToPetitionHist: List[BinnedDaysCount]
 
+# Add Petition Types
+class PetitionTypeCount(BaseModel):
+    petition_type: str
+    count: int
+
+class PetitionTypeResponse(BaseModel):
+    petitionTypes: List[PetitionTypeCount]
+
+class PartyCount(BaseModel):
+    party: str
+    count: int
+
+class PartiesResponse(BaseModel):
+    parties: List[PartyCount]
+
+
 @router.get("/kpis")
 def get_kpis():
     query = (
@@ -272,4 +288,39 @@ def binned_days_petition_to_death():
 
     return BinnedDaysDeathToPetitionResponse(
         daysDeathToPetitionHist=[BinnedDaysCount(**row) for row in q]
+    )
+
+@router.get("/petition-types")
+def petition_type_mix():
+    q = (
+        ProbateRecord.select(
+            fn.coalesce(ProbateRecord.petition_type, Value("Unknown")).alias("petition_type"),
+            fn.count(Value(1)).alias("count"),
+        )
+        .where(ProbateRecord.petition_type.is_null(False) & (ProbateRecord.petition_type != ""))
+        .group_by(ProbateRecord.petition_type)
+        .order_by(SQL("count").desc())
+        .dicts()
+    )
+
+    return PetitionTypeResponse(
+        petitionTypes=[PetitionTypeCount(**row) for row in q]
+    )
+
+@router.get("/get-parties")
+def petition_types():
+    parties = (
+        ProbateRecord
+        .select(
+            ProbateRecord.party,
+            fn.count(Value(1)).alias("count")
+        )
+        .where(ProbateRecord.party.is_null(False) & (ProbateRecord.party != ""))
+        .group_by(ProbateRecord.party)
+        .order_by(SQL("count").desc())
+        .dicts()
+    )
+    
+    return PartiesResponse(
+        parties=[PartyCount(**row) for row in parties]
     )
