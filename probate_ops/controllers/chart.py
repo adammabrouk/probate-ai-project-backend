@@ -95,6 +95,14 @@ class PartiesResponse(BaseModel):
     parties: List[PartyCount]
 
 
+class AbsCountyItem(BaseModel):
+    county: str
+    absentee: int
+    local: int
+
+class AbsCountyResp(BaseModel):
+    absenteeByCounty: List[AbsCountyItem]
+
 @router.get("/kpis")
 def get_kpis():
     absentee_case = Case(None, [(_absentee_expr(), 1)], 0)
@@ -373,3 +381,26 @@ def petition_types():
     )
 
     return PartiesResponse(parties=[PartyCount(**row) for row in parties])
+
+@router.get("/absentee-by-county", response_model=AbsCountyResp)
+def absentee_by_county():
+    ae = _absentee_expr()
+    absentee_sum = fn.sum(Case(None, [(ae, 1)], 0))
+    total = fn.count(Value(1))
+    local_cnt = total - absentee_sum
+
+    q = (
+        ProbateRecord
+        .select(
+            ProbateRecord.county,
+            absentee_sum.alias("absentee"),
+            local_cnt.alias("local"),
+        )
+        .where(ProbateRecord.county.is_null(False) & (ProbateRecord.county != ""))
+        .group_by(ProbateRecord.county)
+        .order_by(SQL("absentee DESC"))
+        .dicts()
+    )
+
+    out = [{"county": r["county"], "absentee": int(r["absentee"] or 0), "local": int(r["local"] or 0)} for r in q]
+    return {"absenteeByCounty": out}
