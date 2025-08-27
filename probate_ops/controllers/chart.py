@@ -402,5 +402,7 @@ def absentee_by_county():
         .dicts()
     )
 
-    out = [{"county": r["county"], "absentee": int(r["absentee"] or 0), "local": int(r["local"] or 0)} for r in q]
-    return {"absenteeByCounty": out}
+    
+    return AbsCountyResp(
+        absenteeByCounty=[AbsCountyItem(**row) for row in q]
+    )
