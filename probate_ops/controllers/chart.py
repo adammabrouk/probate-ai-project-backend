@@ -406,3 +406,25 @@ def absentee_by_county():
     return AbsCountyResp(
         absenteeByCounty=[AbsCountyItem(**row) for row in q]
     )
+
+class FilingsMonthItem(BaseModel):
+    month: str
+    count: int
+
+class FilingsMonthResp(BaseModel):
+    filingsByMonth: List[FilingsMonthItem]
+
+@router.get("/filings-by-month", response_model=FilingsMonthResp)
+def filings_by_month():
+    q = (
+        ProbateRecord
+        .select(_month_label.alias("month"), fn.count(Value(1)).alias("count"))
+        .where(ProbateRecord.petition_date.is_null(False))
+        .group_by(SQL("month"))
+        .order_by(SQL("month"))
+        .dicts()
+    )
+    
+    return FilingsMonthResp(
+        filingsByMonth=[FilingsMonthItem(**row) for row in q]
+    )
