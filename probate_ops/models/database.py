@@ -23,7 +23,10 @@ class ProbateRecord(Model):
     state = CharField()
     zip = CharField()
     party = CharField()  # Petitioner
-    mailing_address = CharField()  # Party Street+City+State+Zip
+    party_address = TextField()  # Full mailing address of petitioner
+    party_city = CharField(null=True)
+    party_state = CharField(null=True)
+    party_zip = CharField(null=True)
     petition_type = TextField(null=True)
     petition_date = DateField(null=True)  # ISO date
     death_date = DateField(null=True)  # ISO date
@@ -57,9 +60,12 @@ class ProbateRecord(Model):
             "property_address" : data.get("Street Address"),
             "city" : data.get("City"),
             "state" : data.get("State"),
-            "zip" : data.get("Zip Code"),
+            "zip" : str(data.get("Zip Code")),
             "party" : data.get("Party"),
-            "mailing_address" : f"{data.get('Party Street Address')}, {data.get('Party City')}, {data.get('Party State')} {data.get('Party Zip Code')}",
+            "party_address" : data.get('Party Street Address'),
+            "party_city" : data.get("Party City"),
+            "party_state" : data.get("Party State"),
+            "party_zip" : str(data.get("Party Zip Code")),
             "petition_type" : data.get("Petition Type"),
             "petition_date" : data.get("Petition Date"),
             "death_date" : data.get("Death Date"),
