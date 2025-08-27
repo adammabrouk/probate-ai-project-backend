@@ -33,6 +33,3 @@ class SQLStore:
 
     def query(self, sql: str) -> pd.DataFrame:
         return self.con.execute(sql).df()
-
-
-sqlstore = SQLStore()

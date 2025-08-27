@@ -1,5 +1,5 @@
 import pandas as pd
-from ..core.storage import sqlstore
+from probate_ops.core.storage import SQLStore
 
 SAFE = (
     "select",
@@ -24,6 +24,6 @@ def _safe(sql: str) -> str:
 
 
 def run_sql(query: str) -> dict:
-    df: pd.DataFrame = sqlstore.query(_safe(query))
+    df: pd.DataFrame = SQLStore().query(_safe(query))
     preview = df.head(50).to_dict(orient="records")
     return {"rows": preview, "row_count": len(df)}
