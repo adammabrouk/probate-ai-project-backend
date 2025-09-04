@@ -13,7 +13,6 @@ _month_label = fn.to_char(
     fn.date_trunc("month", ProbateRecord.petition_date), Value("YYYY-MM")
 )
 
-
 def _absentee_expr():
     return (
         (ProbateRecord.zip.is_null(False))
@@ -21,79 +20,62 @@ def _absentee_expr():
         & (ProbateRecord.zip != ProbateRecord.party_zip)
     )
 
-
 def _apply_filters(q: peewee.Query, f: Any):
     # For now returning the query as is
     return q
-
 
 class KPIValue(BaseModel):
     label: str
     value: Union[int, float, str]
 
-
 class KPIResponse(BaseModel):
     kpis: List[KPIValue]
-
 
 class PropertyClassCount(BaseModel):
     property_class: str
     count: int
 
-
 class PropertyClassMixResponse(BaseModel):
     propertyClassMix: List[PropertyClassCount]
-
 
 class CountyCount(BaseModel):
     county: str
     count: int
 
-
 class CountyCountResponse(BaseModel):
     countByCounty: List[CountyCount]
-
 
 class CountyAverageValue(BaseModel):
     county: str
     average_value: float
 
-
 class CountyAverageValueResponse(BaseModel):
     averageValueByCounty: List[CountyAverageValue]
-
 
 class BinnedDaysCount(BaseModel):
     bin: str
     count: int
 
-
 class BinnedDaysSincePetitionResponse(BaseModel):
     daysSincePetitionHist: List[BinnedDaysCount]
 
-
 class BinnedDaysDeathToPetitionResponse(BaseModel):
     daysDeathToPetitionHist: List[BinnedDaysCount]
-
 
 # Add Petition Types
 class PetitionTypeCount(BaseModel):
     petition_type: str
     count: int
 
-
 class PetitionTypeResponse(BaseModel):
     petitionTypes: List[PetitionTypeCount]
-
 
 class PartyCount(BaseModel):
     party: str
     count: int
 
-
 class PartiesResponse(BaseModel):
     parties: List[PartyCount]
-
 
 class AbsCountyItem(BaseModel):
     county: str
@@ -102,6 +84,27 @@ class AbsCountyItem(BaseModel):
 
 class AbsCountyResp(BaseModel):
     absenteeByCounty: List[AbsCountyItem]
+
+class FilingsMonthItem(BaseModel):
+    month: str
+    count: int
+
+class FilingsMonthResp(BaseModel):
+    filingsByMonth: List[FilingsMonthItem]
+
+class AbsRateItem(BaseModel):
+    month: str
+    rate: float
+
+class AbsRateResp(BaseModel):
+    absenteeRateTrend: List[AbsRateItem]
+
+class ValueBucket(BaseModel):
+    bucket: str
+    count: int
+
+class ValueHistResp(BaseModel):
+    valueHist: List[ValueBucket]
 
 @router.get("/kpis")
 def get_kpis():
@@ -407,13 +410,6 @@ def absentee_by_county():
         absenteeByCounty=[AbsCountyItem(**row) for row in q]
     )
 
-class FilingsMonthItem(BaseModel):
-    month: str
-    count: int
-
-class FilingsMonthResp(BaseModel):
-    filingsByMonth: List[FilingsMonthItem]
-
 @router.get("/filings-by-month", response_model=FilingsMonthResp)
 def filings_by_month():
     q = (
@@ -428,3 +424,66 @@ def filings_by_month():
     return FilingsMonthResp(
         filingsByMonth=[FilingsMonthItem(**row) for row in q]
     )
+
+@router.get("/absentee-rate-trend", response_model=AbsRateResp)
+def absentee_rate_trend():
+    ae = _absentee_expr()
+    rate = fn.avg(Case(None, [(ae, 1)], 0))
+    q = (
+        ProbateRecord
+        .select(_month_label.alias("month"), rate.alias("rate"))
+        .where(ProbateRecord.petition_date.is_null(False))
+        .group_by(SQL("month"))
+        .order_by(SQL("month"))
+        .dicts()
+    )
+
+    return AbsRateResp(
+        absenteeRateTrend=[AbsRateItem(month=row["month"], rate=float(row["rate"] or 0)) for row in q]
+    )
+
+
+@router.get("/value-hist", response_model=ValueHistResp)
+def value_hist():
+    pv = ProbateRecord.property_value
+
+    # [low, high) bins; last bin is 1M+ (no upper bound)
+    bins = [
+        (0,        100_000,  "<100k"),
+        (100_000,  250_000,  "100–250k"),
+        (250_000,  500_000,  "250–500k"),
+        (500_000, 1_000_000, "500k–1M"),
+        (1_000_000, None,    "1M+"),
+    ]
+
+    # Build CASE WHEN comparisons (wrap numeric literals in Value(...))
+    cases = []
+    for low, high, label in bins:
+        low_v = Value(low)
+        if high is None:
+            cond = (pv.is_null(False)) & (pv >= low_v)
+        else:
+            high_v = Value(high)
+            cond = (pv.is_null(False)) & (pv >= low_v) & (pv < high_v)  # half-open interval
+        cases.append((cond, Value(label)))
+
+    bucket_expr = Case(None, cases, Value("Unknown")).alias("bucket")
+    count_expr = fn.COUNT(1).alias("count")
+
+    # Query without SQL ordering on alias (avoid "column 'bucket' does not exist")
+    q = (
+        ProbateRecord
+        .select(bucket_expr, count_expr)
+        .where(ProbateRecord.property_value.is_null(False))
+        .group_by(bucket_expr)
+        .dicts()
+    )
+
+    rows = [{"bucket": r["bucket"], "count": int(r["count"] or 0)} for r in q]
+
+    # Order in Python (stable and simple)
+    order = {label: i for i, (_, _, label) in enumerate(bins, start=1)}
+    rows.sort(key=lambda r: order.get(r["bucket"], 999))
+
+
+    return ValueHistResp(valueHist=[ValueBucket(**row) for row in rows])

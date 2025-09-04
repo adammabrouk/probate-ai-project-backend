@@ -4,7 +4,7 @@ from .core.registry import registry
 from .tools.sql_tool import run_sql
 from .tools.df_tool import run_df
 from .tools.llm_score_tool import score_llm
-from .controllers import ingest, analyze, ask, flows, chart
+from .controllers import ingest, analyze, ask, flows, chart, shortlist
 
 app = FastAPI(title="ProbateOps API", version="1.0.0")
 
@@ -27,6 +27,7 @@ app.include_router(analyze.router)
 app.include_router(ask.router)
 app.include_router(flows.router)
 app.include_router(chart.router)
+app.include_router(shortlist.router)
 
 @app.get("/health")
 def health():
