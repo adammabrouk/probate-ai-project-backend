@@ -49,42 +49,57 @@ class ProbateRecord(Model):
         database = postgres_db
         # Add unique constraint on (case_no, state)
         indexes = ((("case_no", "state"), True),)
-        
+
     @classmethod
     def from_dict(cls, data: dict):
         return {
-            "county" : data.get("County"),  # Assuming all records are from the USA
-            "source_url" : data.get("Source URL"),
-            "case_no" : data.get("Case No"),
-            "owner_name" : data.get("Decedent"),
-            "property_address" : data.get("Street Address"),
-            "city" : data.get("City"),
-            "state" : data.get("State"),
-            "zip" : str(data.get("Zip Code")),
-            "party" : data.get("Party"),
-            "party_address" : data.get('Party Street Address'),
-            "party_city" : data.get("Party City"),
-            "party_state" : data.get("Party State"),
-            "party_zip" : str(data.get("Party Zip Code")),
-            "petition_type" : data.get("Petition Type"),
-            "petition_date" : data.get("Petition Date"),
-            "death_date" : data.get("Death Date"),
-            "qpublic_report_url" : data.get("qpublic_report_url"),
-            "parcel_number" : data.get("parcel_number"),
-            "property_class" : data.get("property_class"),
-            "property_tax_district" : data.get("property_tax_district"),
-            "property_value" : float(data.get("property_value_2025").replace(",","").replace("$","")) if data.get("property_value_2025") else None,
-            "property_acres" : float(data.get("property_acres")) if data.get("property_acres") else None,
-            "property_image" : data.get("property_image"),
-            "absentee_flag" : None,  # Needs custom logic to determine
-            "days_since_petition" : None,  # Needs custom logic to calculate
-            "days_since_death" : None,  # Needs custom logic to calculate
-            "holdings_in_file" : None,  # Needs custom logic to determine
-            "score" : None,  # Needs custom logic to calculate
-            "tier" : None,  # Needs custom logic to assign
-            "rationale" : None,  # Needs custom logic to generate
+            "county": data.get(
+                "County"
+            ),  # Assuming all records are from the USA
+            "source_url": data.get("Source URL"),
+            "case_no": data.get("Case No"),
+            "owner_name": data.get("Decedent"),
+            "property_address": data.get("Street Address"),
+            "city": data.get("City"),
+            "state": data.get("State"),
+            "zip": str(data.get("Zip Code")),
+            "party": data.get("Party"),
+            "party_address": data.get("Party Street Address"),
+            "party_city": data.get("Party City"),
+            "party_state": data.get("Party State"),
+            "party_zip": str(data.get("Party Zip Code")),
+            "petition_type": data.get("Petition Type"),
+            "petition_date": data.get("Petition Date"),
+            "death_date": data.get("Death Date"),
+            "qpublic_report_url": data.get("qpublic_report_url"),
+            "parcel_number": data.get("parcel_number"),
+            "property_class": data.get("property_class"),
+            "property_tax_district": data.get("property_tax_district"),
+            "property_value": (
+                float(
+                    data.get("property_value_2025")
+                    .replace(",", "")
+                    .replace("$", "")
+                )
+                if data.get("property_value_2025")
+                else None
+            ),
+            "property_acres": (
+                float(data.get("property_acres"))
+                if data.get("property_acres")
+                else None
+            ),
+            "property_image": data.get("property_image"),
+            "absentee_flag": None,  # Needs custom logic to determine
+            "days_since_petition": None,  # Needs custom logic to calculate
+            "days_since_death": None,  # Needs custom logic to calculate
+            "holdings_in_file": None,  # Needs custom logic to determine
+            "score": None,  # Needs custom logic to calculate
+            "tier": None,  # Needs custom logic to assign
+            "rationale": None,  # Needs custom logic to generate
         }
-    
+
+
 if __name__ == "__main__":
     postgres_db.connect()
     postgres_db.create_tables([ProbateRecord])

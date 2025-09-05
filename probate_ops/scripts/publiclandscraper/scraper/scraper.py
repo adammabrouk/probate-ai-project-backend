@@ -232,7 +232,7 @@ def navigate_into_app(driver, ctx: RowCtx):
         logger.info("Trying to find first Application link on page")
         fallback = driver.find_element(
             By.XPATH,
-            "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]"
+            "//a[contains(@href,'Application.aspx') and contains(@href,'AppID=')]",
         )
         driver.get(fallback.get_attribute("href"))
         ctx.visited_url = driver.current_url
