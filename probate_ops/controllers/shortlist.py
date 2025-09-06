@@ -1,7 +1,7 @@
 from probate_ops.models.api import ChartFilters
 from probate_ops.models.database import ProbateRecord
 from probate_ops.utils.database import _apply_filters, chart_filters_dep
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from peewee import fn, Value
 from typing_extensions import Annotated
 
@@ -20,10 +20,13 @@ def _absentee_expr():
 def shortlist(
     f: Annotated[ChartFilters, Depends(chart_filters_dep)],
     page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=200)
+    page_size: int = Query(25, ge=1, le=2000),
+    sort: str = Query(None, description="Sort columns, e.g. 'score:desc,county:asc'")
     ):
 
-    base = _apply_filters(ProbateRecord.select(), f)    
+    # Start with a select query
+    base = ProbateRecord.select()
+    base = _apply_filters(base, f)
     ae = _absentee_expr()
     mailing = fn.concat_ws(
         Value(", "),
@@ -33,34 +36,42 @@ def shortlist(
         ProbateRecord.party_zip,
     ).alias("mailing_address")
 
+    # --- Sorting ---
+    if sort:
+        order_by = []
+        for part in sort.split(","):
+            if not part.strip():
+                continue
+            col, *dir_part = part.split(":")
+            direction = dir_part[0] if dir_part else "asc"
+            col_map = {
+                "score": ProbateRecord.score,
+                "tier": ProbateRecord.tier,
+                "county": ProbateRecord.county,
+                "case_no": ProbateRecord.case_no,
+                "owner_name": ProbateRecord.owner_name,
+                "property_address": ProbateRecord.property_address,
+                "city": ProbateRecord.city,
+                "property_value_2025": ProbateRecord.property_value,
+                "property_value": ProbateRecord.property_value,
+                "petition_date": ProbateRecord.petition_date,
+                # Note: absentee_flag is not a real column, skip for sorting
+                "parcel_number": ProbateRecord.parcel_number,
+                "qpublic_report_url": ProbateRecord.qpublic_report_url,
+                "rationale": ProbateRecord.rationale,
+            }
+            field = col_map.get(col)
+            if field is not None:
+                if direction == "desc":
+                    order_by.append(field.desc())
+                else:
+                    order_by.append(field.asc())
+        if order_by:
+            base = base.order_by(*order_by)
+
     total = base.count()
 
-    q = base.select(
-        ProbateRecord.score,
-        ProbateRecord.tier,
-        ProbateRecord.county,
-        ProbateRecord.case_no,
-        ProbateRecord.owner_name,
-        ProbateRecord.property_address,
-        ProbateRecord.city,
-        ProbateRecord.property_value.alias("property_value_2025"),
-        fn.to_char(ProbateRecord.petition_date, Value("YYYY-MM-DD")).alias(
-            "petition_date"
-        ),
-        ae.alias("absentee_flag"),
-        ProbateRecord.parcel_number,
-        ProbateRecord.qpublic_report_url,
-        ProbateRecord.rationale,
-        ProbateRecord.source_url,
-        ProbateRecord.state,
-        ProbateRecord.zip,
-        ProbateRecord.party,
-        mailing,
-        ProbateRecord.petition_type,
-        fn.to_char(ProbateRecord.death_date, Value("YYYY-MM-DD")).alias(
-            "death_date"
-        ),
-    ).paginate(page, page_size).dicts()
+    q = base.paginate(page, page_size).dicts()
 
     # Meta
     total_pages = (total + page_size - 1) // page_size if page_size else 1
@@ -72,4 +83,10 @@ def shortlist(
         "has_next": page < total_pages,
         "has_prev": page > 1,
     }
-    return {"shortlist": list(q), "meta": meta}
+    # Compose output dicts with aliases
+    result = []
+    for row in q:
+        row["property_value_2025"] = row.get("property_value")
+        row["absentee_flag"] = bool(ae)
+        result.append(row)
+    return {"shortlist": result, "meta": meta}
