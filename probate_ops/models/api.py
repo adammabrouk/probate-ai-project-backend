@@ -14,3 +14,8 @@ class ChartFilters(BaseModel):
     max_value: Optional[float] = Query(None)
     month_from: Optional[str] = Query(None)
     month_to: Optional[str] = Query(None)
+    property_class: Optional[str] = Query(None)
+    days_since_petition_min: Optional[int] = Query(None)
+    days_since_petition_max: Optional[int] = Query(None)
+    days_death_to_petition_min: Optional[int] = Query(None)
+    days_death_to_petition_max: Optional[int] = Query(None)
