@@ -42,7 +42,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class RowCtx:
     row: Dict[str, Any]
@@ -52,6 +51,12 @@ class RowCtx:
     appid: Optional[str] = None
     visited_url: Optional[str] = None
 
+
+def sanitize_property_class(prop_class: str) -> str:
+    """Sanitize property class by keeping only characters before the end of the line break (\n)"""
+    if not prop_class:
+        return ""
+    return prop_class.split("\n")[0].strip()
 
 def page_has_no_results_text(driver) -> bool:
     """Return True iff the 'No results match your search criteria.' message is present."""
@@ -149,11 +154,12 @@ def select_state_and_county(driver, ctx: RowCtx):
 
     # Exact visible label match like "Atkinson County, GA"
     # But some labels include two spaces in “County,  GA”, so match loosely
+
     area_option = wait.until(
         EC.presence_of_element_located(
             (
                 By.XPATH,
-                "//div[@id='areaMenuContent']//div[@role='option' and contains(normalize-space(.), 'County') and contains(., ',') and contains(normalize-space(.), %s)]"
+                "//div[@id='areaMenuContent']//div[@role='option' and contains(normalize-space(.), 'County') and contains(., ',') and contains(., 'GA') and contains(normalize-space(.), %s)]"
                 % repr(f"{ctx.county} County"),
             )
         )
@@ -270,6 +276,13 @@ def switch_into_app_frame(driver):
         )
     )
     driver.execute_script("arguments[0].click();", agree_btn)
+    logger.info("Waiting for 'Close' button in iframe")
+    close_btn = WebDriverWait(driver, 2).until(
+        EC.element_to_be_clickable(
+            (By.XPATH, "//a[normalize-space()='Close']")
+        )
+    )
+    driver.execute_script("arguments[0].click();", close_btn)
 
 
 def open_search_panel(driver):
@@ -609,7 +622,7 @@ def enrich_row(driver, row: Dict[str, Any]) -> Dict[str, Any]:
         summary = extract_property_summary(driver)
         if summary:
             row["parcel_number"] = summary.get("Parcel Number", "")
-            row["property_class"] = summary.get("Class", "")
+            row["property_class"] = sanitize_property_class(summary.get("Class", ""))
             row["property_tax_district"] = summary.get("Tax District", "")
             row["property_acres"] = summary.get("Acres", "")
 
