@@ -19,3 +19,4 @@ class ChartFilters(BaseModel):
     days_since_petition_max: Optional[int] = Query(None)
     days_death_to_petition_min: Optional[int] = Query(None)
     days_death_to_petition_max: Optional[int] = Query(None)
+    has_value: Optional[bool] = Query(None)

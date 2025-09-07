@@ -92,6 +92,8 @@ def _apply_filters(q, f: ChartFilters) -> peewee.Query:
             (ProbateRecord.death_date.is_null(False)) &
             (death_to_petition_expr <= f.days_death_to_petition_max)
         )
+    if f.has_value:
+        q = q.where(ProbateRecord.property_value.is_null(False))
     return q
 
 
@@ -111,6 +113,7 @@ def chart_filters_dep(
     days_since_petition_max: Annotated[Optional[int], Query()] = None,
     days_death_to_petition_min: Annotated[Optional[int], Query()] = None,
     days_death_to_petition_max: Annotated[Optional[int], Query()] = None,
+    has_value: Annotated[Optional[bool], Query()] = None
 ) -> ChartFilters:
     return ChartFilters(
         counties=counties,
@@ -128,6 +131,7 @@ def chart_filters_dep(
         days_since_petition_max=days_since_petition_max,
         days_death_to_petition_min=days_death_to_petition_min,
         days_death_to_petition_max=days_death_to_petition_max,
+        has_value=has_value
     )
 
 
